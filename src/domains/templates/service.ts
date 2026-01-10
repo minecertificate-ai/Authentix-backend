@@ -6,8 +6,11 @@
 
 import type { TemplateRepository } from './repository.js';
 import type { TemplateEntity, CreateTemplateDTO, UpdateTemplateDTO } from './types.js';
-import { NotFoundError, ValidationError } from '../../lib/errors/handler.js';
+import { NotFoundError } from '../../lib/errors/handler.js';
 import { getSupabaseClient } from '../../lib/supabase/client.js';
+import { getCachedSignedUrl, setCachedSignedUrl } from '../../lib/cache/signed-url-cache.js';
+import { validateFileUpload } from '../../lib/uploads/validator.js';
+import { generateSecureFilename } from '../../lib/uploads/filename.js';
 
 export class TemplateService {
   constructor(private readonly repository: TemplateRepository) {}
@@ -36,6 +39,7 @@ export class TemplateService {
       limit?: number;
       sortBy?: string;
       sortOrder?: 'asc' | 'desc';
+      includePreviewUrl?: boolean;
     } = {}
   ): Promise<{ templates: TemplateEntity[]; total: number }> {
     const limit = options.limit ?? 20;
@@ -50,6 +54,15 @@ export class TemplateService {
       sortOrder: options.sortOrder,
     });
 
+    // If includePreviewUrl is requested, batch generate signed URLs
+    if (options.includePreviewUrl && data.length > 0) {
+      const templatesWithUrls = await this.batchGeneratePreviewUrls(data);
+      return {
+        templates: templatesWithUrls,
+        total: count,
+      };
+    }
+
     return {
       templates: data,
       total: count,
@@ -57,7 +70,82 @@ export class TemplateService {
   }
 
   /**
+   * Batch generate signed preview URLs for multiple templates
+   * Uses cache-first approach and Supabase batch API for efficiency
+   */
+  private async batchGeneratePreviewUrls(templates: TemplateEntity[]): Promise<TemplateEntity[]> {
+    const supabase = getSupabaseClient();
+    const pathsToFetch: string[] = [];
+    const pathIndexMap: Map<string, number[]> = new Map();
+
+    // Check cache first
+    templates.forEach((template, index) => {
+      if (!template.storage_path) return;
+
+      const cached = getCachedSignedUrl(template.storage_path);
+      if (cached) {
+        // Cache hit - use cached URL
+        template.preview_url = cached;
+      } else {
+        // Cache miss - need to fetch
+        pathsToFetch.push(template.storage_path);
+
+        const indices = pathIndexMap.get(template.storage_path) || [];
+        indices.push(index);
+        pathIndexMap.set(template.storage_path, indices);
+      }
+    });
+
+    // If all URLs were cached, return early
+    if (pathsToFetch.length === 0) {
+      return templates;
+    }
+
+    // Batch generate signed URLs for cache misses
+    try {
+      const { data: signedUrls, error } = await supabase.storage
+        .from('minecertificate')
+        .createSignedUrls(pathsToFetch, 3600); // 1 hour expiry
+
+      if (error || !signedUrls) {
+        // Fallback: use existing preview URLs
+        console.error('Failed to batch generate signed URLs:', error);
+        return templates;
+      }
+
+      // Map signed URLs back to templates and cache them
+      const urlMap = new Map<string, string>();
+      signedUrls.forEach((item, index) => {
+        if (item.signedUrl) {
+          const path = pathsToFetch[index];
+          if (path) {
+            urlMap.set(path, item.signedUrl);
+            // Cache each URL individually (expires in 3600 seconds)
+            setCachedSignedUrl(path, item.signedUrl, 3600);
+          }
+        }
+      });
+
+      // Update templates with signed URLs
+      pathIndexMap.forEach((indices, path) => {
+        const signedUrl = urlMap.get(path);
+        if (signedUrl) {
+          indices.forEach((index) => {
+            templates[index]!.preview_url = signedUrl;
+          });
+        }
+      });
+
+      return templates;
+    } catch (error) {
+      console.error('Error batch generating signed URLs:', error);
+      return templates; // Fallback to existing URLs
+    }
+  }
+
+  /**
    * Create template
+   * Uses magic byte validation for security (OWASP compliant)
    */
   async create(
     companyId: string,
@@ -65,22 +153,33 @@ export class TemplateService {
     dto: CreateTemplateDTO,
     file: { buffer: Buffer; mimetype: string; originalname: string }
   ): Promise<TemplateEntity> {
-    // Validate file type
-    const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
-    if (!allowedTypes.includes(file.mimetype)) {
-      throw new ValidationError('Invalid file type. Allowed: PDF, PNG, JPEG');
-    }
+    // Validate file using magic byte detection (prevents file spoofing)
+    const allowedMimeTypes = [
+      'application/pdf',
+      'image/png',
+      'image/jpeg',
+    ] as const;
 
-    // Upload file to Supabase Storage
+    const validationResult = await validateFileUpload(
+      file.buffer,
+      file.mimetype,
+      allowedMimeTypes
+    );
+
+    // Use validated mimetype (from magic bytes) instead of client-provided
+    const validatedMimetype = validationResult.detectedType;
+
+    // Upload file to Supabase Storage with secure filename
     const supabase = getSupabaseClient();
-    const fileExt = file.originalname.split('.').pop();
-    const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const storagePath = `templates/${companyId}/${fileName}`;
+
+    // Generate secure filename (never trust client input)
+    const secureFilename = generateSecureFilename(validatedMimetype);
+    const storagePath = `templates/${companyId}/${secureFilename}`;
 
     const { error: uploadError } = await supabase.storage
       .from('minecertificate')
       .upload(storagePath, file.buffer, {
-        contentType: file.mimetype,
+        contentType: validatedMimetype, // Use validated mimetype
         upsert: false,
       });
 
@@ -125,23 +224,37 @@ export class TemplateService {
 
   /**
    * Get signed URL for template preview
+   * Uses cache-first approach
    */
   async getPreviewUrl(id: string, companyId: string): Promise<string> {
     const template = await this.getById(id, companyId);
 
-    if (!template.preview_url) {
-      throw new NotFoundError('Template preview URL not available');
+    if (!template.storage_path) {
+      throw new NotFoundError('Template storage path not available');
+    }
+
+    // Check cache first
+    const cached = getCachedSignedUrl(template.storage_path);
+    if (cached) {
+      return cached;
     }
 
     // Generate signed URL (expires in 1 hour)
     const supabase = getSupabaseClient();
-    const { data } = await supabase.storage
+    const { data, error } = await supabase.storage
       .from('minecertificate')
       .createSignedUrl(template.storage_path, 3600);
 
-    if (!data) {
-      return template.preview_url; // Fallback to public URL
+    if (error || !data) {
+      // Fallback to public URL if available
+      if (template.preview_url) {
+        return template.preview_url;
+      }
+      throw new Error('Failed to generate signed URL');
     }
+
+    // Cache the signed URL (expires in 3600 seconds)
+    setCachedSignedUrl(template.storage_path, data.signedUrl, 3600);
 
     return data.signedUrl;
   }

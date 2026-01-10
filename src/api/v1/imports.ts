@@ -15,6 +15,8 @@ import { parsePagination } from '../../lib/utils/validation.js';
 import { sendSuccess, sendPaginated, sendError } from '../../lib/utils/response.js';
 import { getSupabaseClient } from '../../lib/supabase/client.js';
 import { NotFoundError, ValidationError } from '../../lib/errors/handler.js';
+import { uploadRateLimitConfig } from '../../lib/security/rate-limit-presets.js';
+import { config } from '../../lib/config/env.js';
 
 /**
  * Register import routes
@@ -96,9 +98,15 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
   /**
    * POST /api/v1/import-jobs
    * Create new import job
+   * Rate limited to prevent abuse (10 uploads per hour)
    */
   app.post(
     '/import-jobs',
+    {
+      config: {
+        rateLimit: config.RATE_LIMIT_ENABLED ? uploadRateLimitConfig : false,
+      },
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         // Parse multipart form data

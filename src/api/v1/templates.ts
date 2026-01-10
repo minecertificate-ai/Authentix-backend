@@ -15,6 +15,8 @@ import { parsePagination } from '../../lib/utils/validation.js';
 import { sendSuccess, sendPaginated, sendError } from '../../lib/utils/response.js';
 import { getSupabaseClient } from '../../lib/supabase/client.js';
 import { NotFoundError, ValidationError } from '../../lib/errors/handler.js';
+import { uploadRateLimitConfig } from '../../lib/security/rate-limit-presets.js';
+import { config } from '../../lib/config/env.js';
 
 /**
  * Register template routes
@@ -27,13 +29,22 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
   /**
    * GET /api/v1/templates
    * List all templates for the authenticated company
+   * Query params:
+   *   - include: comma-separated list of fields to include (e.g., "preview_url")
+   *   - status: filter by status
+   *   - page, limit, sort_by, sort_order: pagination options
    */
   app.get(
     '/templates',
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const { page, limit, sort_by, sort_order } = parsePagination(request.query);
-        const status = (request.query as { status?: string }).status;
+        const query = request.query as { status?: string; include?: string };
+        const status = query.status;
+        const include = query.include;
+
+        // Check if preview_url should be included (batch optimization)
+        const includePreviewUrl = include?.split(',').includes('preview_url') ?? false;
 
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
@@ -44,6 +55,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           limit,
           sortBy: sort_by,
           sortOrder: sort_order,
+          includePreviewUrl,
         });
 
         sendPaginated(reply, {
@@ -96,9 +108,15 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
   /**
    * POST /api/v1/templates
    * Create new template
+   * Rate limited to prevent abuse (10 uploads per hour)
    */
   app.post(
     '/templates',
+    {
+      config: {
+        rateLimit: config.RATE_LIMIT_ENABLED ? uploadRateLimitConfig : false,
+      },
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         // Parse multipart form data

@@ -2,6 +2,7 @@
  * WEBHOOKS API
  *
  * RESTful API endpoints for webhook handlers.
+ * Uses scoped rawBody parser for signature verification.
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -14,6 +15,17 @@ import { getSupabaseClient } from '../../lib/supabase/client.js';
  */
 export async function registerWebhookRoutes(app: FastifyInstance): Promise<void> {
   // Webhooks don't require JWT auth (they use signature verification)
+
+  // Register rawBody parser ONLY for this plugin scope (not global)
+  // This prevents memory overhead for all other routes
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    try {
+      (req as { rawBody?: string }).rawBody = body as string;
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
 
   /**
    * POST /api/v1/webhooks/razorpay

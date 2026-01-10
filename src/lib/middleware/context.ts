@@ -2,6 +2,7 @@
  * CONTEXT MIDDLEWARE
  *
  * Attaches request context to Fastify request.
+ * Creates child logger with user/company context for better debugging.
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
@@ -17,6 +18,7 @@ declare module 'fastify' {
  * Context middleware
  *
  * Attaches request context (user, company, requestId) to request.
+ * Creates child logger with context for better log traceability.
  */
 export async function contextMiddleware(
   request: FastifyRequest,
@@ -26,10 +28,19 @@ export async function contextMiddleware(
     throw new Error('Auth context required before context middleware');
   }
 
+  // Create request context
   request.context = {
     userId: request.auth.userId,
     companyId: request.auth.companyId,
     role: request.auth.role,
     requestId: request.id ?? 'unknown',
   };
+
+  // Create child logger with context
+  // All subsequent logs will include userId, companyId, role
+  request.log = request.log.child({
+    userId: request.auth.userId,
+    companyId: request.auth.companyId,
+    role: request.auth.role,
+  });
 }

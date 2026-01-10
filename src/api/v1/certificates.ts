@@ -8,6 +8,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { FastifyRequest } from 'fastify';
 import { authMiddleware } from '../../lib/auth/middleware.js';
 import { contextMiddleware } from '../../lib/middleware/context.js';
+import { idempotencyPreHandler } from '../../lib/middleware/idempotency.js';
 import { TemplateRepository } from '../../domains/templates/repository.js';
 import { CertificateService } from '../../domains/certificates/service.js';
 import { generateCertificatesSchema } from '../../domains/certificates/types.js';
@@ -26,9 +27,13 @@ export async function registerCertificateRoutes(app: FastifyInstance): Promise<v
   /**
    * POST /api/v1/certificates/generate
    * Generate certificates from template and data
+   * Uses idempotency protection to prevent duplicate generation on network retries
    */
   app.post(
     '/certificates/generate',
+    {
+      preHandler: idempotencyPreHandler, // Prevent duplicate operations
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const body = generateCertificatesSchema.parse(request.body);

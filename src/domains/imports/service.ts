@@ -9,6 +9,8 @@ import type { ImportRepository } from './repository.js';
 import type { ImportJobEntity, CreateImportJobDTO } from './types.js';
 import { getSupabaseClient } from '../../lib/supabase/client.js';
 import { NotFoundError, ValidationError } from '../../lib/errors/handler.js';
+import { validateFileUpload } from '../../lib/uploads/validator.js';
+import { generateSecureFilename } from '../../lib/uploads/filename.js';
 
 export class ImportService {
   constructor(private readonly repository: ImportRepository) {}
@@ -59,6 +61,7 @@ export class ImportService {
 
   /**
    * Create import job from file
+   * Uses magic byte validation for security (OWASP compliant)
    */
   async create(
     companyId: string,
@@ -66,22 +69,22 @@ export class ImportService {
     dto: CreateImportJobDTO,
     file: { buffer: Buffer; mimetype: string; originalname: string }
   ): Promise<ImportJobEntity> {
-    // Validate file type
-    const allowedTypes = [
+    // Validate file using magic byte detection (prevents file spoofing)
+    const allowedMimeTypes = [
       'application/vnd.ms-excel',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'text/csv',
-    ];
+      'text/plain', // CSV can be detected as text/plain
+    ] as const;
 
-    const isValidType =
-      allowedTypes.includes(file.mimetype) ||
-      file.originalname.match(/\.(xlsx|xls|csv)$/i);
+    const validationResult = await validateFileUpload(
+      file.buffer,
+      file.mimetype,
+      allowedMimeTypes
+    );
 
-    if (!isValidType) {
-      throw new ValidationError(
-        'Invalid file type. Allowed: CSV, XLS, XLSX'
-      );
-    }
+    // Use validated mimetype (from magic bytes) instead of client-provided
+    const validatedMimetype = validationResult.detectedType;
 
     // Parse file
     let jsonData: Array<Record<string, unknown>>;
@@ -112,16 +115,17 @@ export class ImportService {
       throw new ValidationError('File is empty or has no data');
     }
 
-    // Upload file to Supabase Storage
+    // Upload file to Supabase Storage with secure filename
     const supabase = getSupabaseClient();
-    const fileExt = file.originalname.split('.').pop();
-    const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const storagePath = `imports/${companyId}/${fileName}`;
+
+    // Generate secure filename (never trust client input)
+    const secureFilename = generateSecureFilename(validatedMimetype);
+    const storagePath = `imports/${companyId}/${secureFilename}`;
 
     const { error: uploadError } = await supabase.storage
       .from('minecertificate')
       .upload(storagePath, file.buffer, {
-        contentType: file.mimetype,
+        contentType: validatedMimetype, // Use validated mimetype
         upsert: false,
       });
 
