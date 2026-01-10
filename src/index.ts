@@ -29,8 +29,34 @@ const app = Fastify({
 });
 
 // Register CORS
+// Allow requests from localhost (frontend runs locally) and configured FRONTEND_URL
+const allowedOrigins = [
+  process.env.FRONTEND_URL || 'http://localhost:3000',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
+];
+
 await app.register(import('@fastify/cors'), {
-  origin: process.env.FRONTEND_URL || 'http://localhost:3001',
+  origin: (origin, cb) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return cb(null, true);
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
+    
+    // Default: allow if in allowed list or if FRONTEND_URL matches
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    if (origin.startsWith(frontendUrl) || allowedOrigins.some(url => origin.startsWith(url))) {
+      return cb(null, true);
+    }
+    
+    // Reject other origins
+    return cb(new Error('Not allowed by CORS'), false);
+  },
   credentials: true,
 });
 
