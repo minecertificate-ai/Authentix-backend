@@ -1,0 +1,100 @@
+/**
+ * AUTHENTIX BACKEND
+ *
+ * Fastify server entry point.
+ */
+
+import Fastify from 'fastify';
+import { randomUUID } from 'node:crypto';
+import { errorHandler } from './lib/errors/handler.js';
+
+// Load environment variables
+import 'dotenv/config';
+
+const app = Fastify({
+  logger: {
+    level: process.env.LOG_LEVEL || 'info',
+    transport: process.env.NODE_ENV === 'development' ? {
+      target: 'pino-pretty',
+      options: {
+        translateTime: 'HH:MM:ss Z',
+        ignore: 'pid,hostname',
+      },
+    } : undefined,
+  },
+  requestIdLogLabel: 'requestId',
+  genReqId: () => {
+    return randomUUID();
+  },
+});
+
+// Register CORS
+await app.register(import('@fastify/cors'), {
+  origin: process.env.FRONTEND_URL || 'http://localhost:3001',
+  credentials: true,
+});
+
+// Register multipart for file uploads
+await app.register(import('@fastify/multipart'), {
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB
+  },
+});
+
+// Add raw body parser for webhooks (needed for signature verification)
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+  try {
+    (req as { rawBody?: string }).rawBody = body as string;
+    done(null, JSON.parse(body as string));
+  } catch (err) {
+    done(err as Error, undefined);
+  }
+});
+
+// Register error handler
+app.setErrorHandler(errorHandler);
+
+// Health check
+app.get('/health', async () => {
+  return {
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0',
+  };
+});
+
+// Register API routes
+await app.register(async function (app) {
+  // V1 API routes
+  await app.register(async function (app) {
+    const { registerV1Routes } = await import('./api/v1/index.js');
+    await registerV1Routes(app);
+  }, { prefix: '/api/v1' });
+});
+
+// Start server
+const start = async () => {
+  try {
+    const port = Number(process.env.PORT) || 3000;
+    const host = process.env.HOST || '0.0.0.0';
+
+    await app.listen({ port, host });
+    console.log(`🚀 Authentix Backend running on http://${host}:${port}`);
+  } catch (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+};
+
+// Handle Vercel serverless
+// Check if this is the main module (not imported)
+const isMainModule = import.meta.url === `file://${process.argv[1]}` || 
+                     process.argv[1]?.endsWith('index.ts') ||
+                     process.argv[1]?.endsWith('index.js');
+
+if (isMainModule) {
+  start();
+}
+
+// Export for Vercel
+export default app;
