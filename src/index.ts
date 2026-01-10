@@ -81,7 +81,7 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, 
 app.setErrorHandler(errorHandler);
 
 // Root route - Welcome message
-app.get('/', async (request, reply) => {
+app.get('/', async (_request, reply) => {
   reply.type('application/json');
   return {
     service: 'Authentix Backend API',
