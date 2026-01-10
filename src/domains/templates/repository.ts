@@ -100,7 +100,7 @@ export class TemplateRepository {
         file_type: dto.file_type,
         storage_path: storagePath,
         preview_url: previewUrl,
-        status: 'draft',
+        status: dto.status ?? 'active',
         fields: dto.fields,
         width: dto.width ?? null,
         height: dto.height ?? null,

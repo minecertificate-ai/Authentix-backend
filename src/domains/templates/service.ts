@@ -191,6 +191,13 @@ export class TemplateService {
       }
     });
 
+    // Log for debugging
+    console.log(`[TemplateService] getCategories for company ${companyId}:`, {
+      industry,
+      rowsFound: rows.length,
+      categoriesFound: sortedCategories.length,
+    });
+
     return {
       categories: sortedCategories,
       categoryMap,

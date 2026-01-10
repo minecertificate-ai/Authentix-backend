@@ -1,0 +1,631 @@
+{
+  "users": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "company_id",
+        "type": "uuid",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "email",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "full_name",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "role",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "invited_by",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "last_login_at",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "status",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "last_seen_at",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "deleted_at",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      }
+    ],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "companies": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "name",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "logo",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "email",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "phone",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "website",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "address",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "city",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "state",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "country",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "postal_code",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "billing_address",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "billing_city",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "billing_state",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "billing_country",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "billing_postal_code",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "gst_number",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "cin_number",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "tax_id",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "gst_document_url",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "cin_document_url",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "industry",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "company_size",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "timezone",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "last_active_at",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "application_id",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "status",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "billing_plan",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "api_key_hash",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "api_enabled",
+        "type": "boolean",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "api_key_created_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "api_key_last_rotated_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "currency",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "deleted_at",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "environment",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "business_type",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      }
+    ],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "certificate_templates": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "company_id",
+        "type": "uuid",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "name",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "course_name",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "file_type",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "storage_path",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "preview_url",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "description",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_by",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "fields",
+        "type": "jsonb",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "fields_schema_version",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "width",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "height",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "certificate_category_id",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "version",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "status",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "usage_count",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "last_used_at",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "deleted_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "certificate_subcategory_id",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "certificate_category",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "certificate_subcategory",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "industry",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      }
+    ],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "certificate_categories": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "company_id",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "deleted_at",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "industry",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "certificate_category",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "certificate_subcategory",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      }
+    ],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "certificates": {
+    "columns": [],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "import_jobs": {
+    "columns": [],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "import_data_rows": {
+    "columns": [],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "billing_profiles": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "company_id",
+        "type": "uuid",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "platform_fee_amount",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "certificate_unit_price",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "currency",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "gst_rate",
+        "type": "integer",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "billing_cycle",
+        "type": "text",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "razorpay_customer_id",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "billing_address",
+        "type": "unknown",
+        "nullable": true,
+        "default": null
+      },
+      {
+        "name": "auto_pay_enabled",
+        "type": "boolean",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "effective_from",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": false,
+        "default": null
+      }
+    ],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "invoices": {
+    "columns": [],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "invoice_line_items": {
+    "columns": [],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "verification_logs": {
+    "columns": [],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  },
+  "razorpay_events": {
+    "columns": [],
+    "note": "Schema inferred from sample data. For exact types, constraints, indexes, and RLS, check Supabase Dashboard > Database > Tables"
+  }
+}

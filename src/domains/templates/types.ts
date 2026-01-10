@@ -53,6 +53,7 @@ export const createTemplateSchema = z.object({
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   fields: z.array(certificateFieldSchema).default([]),
+  status: templateStatusSchema.optional().default('active'),
 });
 
 export type CreateTemplateDTO = z.infer<typeof createTemplateSchema>;
