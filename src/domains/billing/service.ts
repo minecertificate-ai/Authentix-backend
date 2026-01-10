@@ -121,7 +121,14 @@ export class BillingService {
    * Get billing overview
    */
   async getBillingOverview(companyId: string): Promise<BillingOverview> {
-    // Get current period (previous month)
+    // Get current period (current month for usage calculation)
+    const now = new Date();
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const currentStartDate = currentMonthStart.toISOString();
+    const currentEndDate = currentMonthEnd.toISOString();
+
+    // Get previous month period (for billing)
     const period = getPreviousMonthBillingPeriod();
     const startDate = period.start.toISOString();
     const endDate = period.end.toISOString();
@@ -132,19 +139,32 @@ export class BillingService {
       throw new NotFoundError('Billing profile not found');
     }
 
-    // Get unbilled certificate count
+    // Get current month unbilled certificate count (for usage display)
+    const currentCertificateCount = await this.repository.getUnbilledCertificateCount(
+      companyId,
+      currentStartDate,
+      currentEndDate
+    );
+
+    // Calculate current month usage
+    const platformFee = profile.platform_fee_amount;
+    const usageCost = currentCertificateCount * profile.certificate_unit_price;
+    const subtotal = platformFee + usageCost;
+    const gstAmount = subtotal * (profile.gst_rate / 100);
+    const estimatedTotal = subtotal + gstAmount;
+
+    // Get previous month unbilled certificate count (for billing period)
     const certificateCount = await this.repository.getUnbilledCertificateCount(
       companyId,
       startDate,
       endDate
     );
 
-    // Calculate estimated amount
-    const platformFee = profile.platform_fee_amount;
+    // Calculate estimated amount for previous month
     const certificateAmount = certificateCount * profile.certificate_unit_price;
-    const subtotal = platformFee + certificateAmount;
-    const taxAmount = subtotal * (profile.gst_rate / 100);
-    const estimatedAmount = subtotal + taxAmount;
+    const periodSubtotal = platformFee + certificateAmount;
+    const periodTaxAmount = periodSubtotal * (profile.gst_rate / 100);
+    const estimatedAmount = periodSubtotal + periodTaxAmount;
 
     // Get recent invoices
     const { invoices } = await this.listInvoices(companyId, {
@@ -161,6 +181,27 @@ export class BillingService {
     );
 
     return {
+      billing_profile: {
+        id: profile.id,
+        company_id: profile.company_id,
+        platform_fee_amount: profile.platform_fee_amount,
+        certificate_unit_price: profile.certificate_unit_price,
+        gst_rate: profile.gst_rate,
+        currency: profile.currency,
+        razorpay_customer_id: profile.razorpay_customer_id,
+        created_at: profile.created_at,
+        updated_at: profile.updated_at,
+      },
+      current_usage: {
+        certificate_count: currentCertificateCount,
+        platform_fee: platformFee,
+        usage_cost: Math.round(usageCost * 100) / 100,
+        subtotal: Math.round(subtotal * 100) / 100,
+        gst_amount: Math.round(gstAmount * 100) / 100,
+        estimated_total: Math.round(estimatedTotal * 100) / 100,
+        currency: profile.currency,
+        gst_rate: profile.gst_rate,
+      },
       current_period: {
         certificate_count: certificateCount,
         estimated_amount: Math.round(estimatedAmount * 100) / 100,

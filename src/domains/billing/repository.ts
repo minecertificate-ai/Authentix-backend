@@ -104,14 +104,19 @@ export class BillingRepository {
    * Get billing profile
    */
   async getBillingProfile(companyId: string): Promise<{
+    id: string;
+    company_id: string;
     platform_fee_amount: number;
     certificate_unit_price: number;
     gst_rate: number;
     currency: string;
+    razorpay_customer_id: string | null;
+    created_at: string;
+    updated_at: string;
   } | null> {
     const { data, error } = await this.supabase
       .from('billing_profiles')
-      .select('platform_fee_amount, certificate_unit_price, gst_rate, currency')
+      .select('id, company_id, platform_fee_amount, certificate_unit_price, gst_rate, currency, razorpay_customer_id, created_at, updated_at')
       .eq('company_id', companyId)
       .maybeSingle();
 

@@ -243,4 +243,25 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       }
     }
   );
+
+  /**
+   * GET /api/v1/templates/categories
+   * Get certificate categories for the authenticated company
+   */
+  app.get(
+    '/templates/categories',
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const repository = new TemplateRepository(getSupabaseClient());
+        const service = new TemplateService(repository);
+
+        const result = await service.getCategories(request.context!.companyId);
+
+        sendSuccess(reply, result);
+      } catch (error) {
+        request.log.error(error, 'Failed to get categories');
+        sendError(reply, 'INTERNAL_ERROR', 'Failed to get categories', 500);
+      }
+    }
+  );
 }

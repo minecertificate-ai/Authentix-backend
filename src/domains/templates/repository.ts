@@ -177,6 +177,55 @@ export class TemplateRepository {
   }
 
   /**
+   * Get certificate categories for company
+   */
+  async getCategories(companyId: string, industry: string | null): Promise<Array<{
+    certificate_category: string;
+    certificate_subcategory: string;
+  }>> {
+    let query = this.supabase
+      .from('certificate_categories')
+      .select('certificate_category, certificate_subcategory')
+      .is('deleted_at', null);
+
+    // Filter by industry if provided
+    if (industry) {
+      query = query.eq('industry', industry);
+    }
+
+    // Get company-specific and system-wide categories
+    query = query.or(`company_id.is.null,company_id.eq.${companyId}`);
+
+    const { data, error } = await query;
+
+    if (error) {
+      throw new Error(`Failed to fetch categories: ${error.message}`);
+    }
+
+    return (data ?? []) as Array<{
+      certificate_category: string;
+      certificate_subcategory: string;
+    }>;
+  }
+
+  /**
+   * Get company industry
+   */
+  async getCompanyIndustry(companyId: string): Promise<string | null> {
+    const { data, error } = await this.supabase
+      .from('companies')
+      .select('industry')
+      .eq('id', companyId)
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(`Failed to fetch company: ${error.message}`);
+    }
+
+    return data?.industry ?? null;
+  }
+
+  /**
    * Map database row to entity
    */
   private mapToEntity(row: Record<string, unknown>): TemplateEntity {

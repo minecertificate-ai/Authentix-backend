@@ -73,6 +73,27 @@ export interface InvoiceLineItemEntity {
  * Billing overview response
  */
 export interface BillingOverview {
+  billing_profile: {
+    id: string;
+    company_id: string;
+    platform_fee_amount: number;
+    certificate_unit_price: number;
+    gst_rate: number;
+    currency: string;
+    razorpay_customer_id: string | null;
+    created_at: string;
+    updated_at: string;
+  };
+  current_usage: {
+    certificate_count: number;
+    platform_fee: number;
+    usage_cost: number;
+    subtotal: number;
+    gst_amount: number;
+    estimated_total: number;
+    currency: string;
+    gst_rate: number;
+  };
   current_period: {
     certificate_count: number;
     estimated_amount: number;

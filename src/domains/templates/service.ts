@@ -145,4 +145,56 @@ export class TemplateService {
 
     return data.signedUrl;
   }
+
+  /**
+   * Get certificate categories for company
+   */
+  async getCategories(companyId: string): Promise<{
+    categories: string[];
+    categoryMap: Record<string, string[]>;
+    industry: string | null;
+  }> {
+    // Get company industry
+    const industry = await this.repository.getCompanyIndustry(companyId);
+
+    // Get categories
+    const rows = await this.repository.getCategories(companyId, industry);
+
+    // Build category map
+    const categoryMap: Record<string, string[]> = {};
+    const categorySet = new Set<string>();
+
+    rows.forEach((row) => {
+      const category = row.certificate_category;
+      const subcategory = row.certificate_subcategory;
+
+      if (!category) return;
+
+      categorySet.add(category);
+
+      if (!categoryMap[category]) {
+        categoryMap[category] = [];
+      }
+
+      const subcategories = categoryMap[category];
+      if (subcategories && subcategory && !subcategories.includes(subcategory)) {
+        subcategories.push(subcategory);
+      }
+    });
+
+    // Sort categories and subcategories
+    const sortedCategories = Array.from(categorySet).sort((a, b) => a.localeCompare(b));
+    Object.keys(categoryMap).forEach((cat) => {
+      const subcategories = categoryMap[cat];
+      if (subcategories) {
+        subcategories.sort((a, b) => a.localeCompare(b));
+      }
+    });
+
+    return {
+      categories: sortedCategories,
+      categoryMap,
+      industry,
+    };
+  }
 }
