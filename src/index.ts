@@ -80,6 +80,23 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, 
 // Register error handler
 app.setErrorHandler(errorHandler);
 
+// Root route - Welcome message
+app.get('/', async (request, reply) => {
+  reply.type('application/json');
+  return {
+    service: 'Authentix Backend API',
+    version: '1.0.0',
+    status: 'running',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: '/health',
+      api: '/api/v1',
+      documentation: 'See API_DOCUMENTATION.md for details',
+    },
+    message: 'Welcome to Authentix Backend API. Use /api/v1 for API endpoints.',
+  };
+});
+
 // Health check
 app.get('/health', async () => {
   return {
