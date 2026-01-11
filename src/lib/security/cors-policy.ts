@@ -8,7 +8,7 @@
  */
 
 import type { FastifyCorsOptions } from '@fastify/cors';
-import { config, isProduction, isDevelopment } from '../config/env.js';
+import { config, isDevelopment } from '../config/env.js';
 
 /**
  * Get allowed origins based on environment
@@ -42,32 +42,33 @@ export function getCorsConfig(): FastifyCorsOptions {
 
   return {
     origin: (origin, callback) => {
-      // In production with strict mode, reject requests without origin
-      if (isProduction && config.CORS_STRICT_MODE && !origin) {
-        callback(new Error('Origin header required'), false);
-        return;
-      }
-
-      // In development, allow requests without origin (e.g., curl, Postman)
-      if (isDevelopment && !origin) {
+      // Allow requests without Origin header (health checks, direct access, server-to-server)
+      // CORS only applies when Origin header is present
+      if (!origin) {
         callback(null, true);
         return;
       }
 
       // Check if origin is in allowlist
-      if (origin && allowedOrigins.includes(origin)) {
+      if (allowedOrigins.includes(origin)) {
         callback(null, true);
         return;
       }
 
       // Check if origin starts with any allowed origin (for subdomain support)
-      if (origin && allowedOrigins.some(allowed => origin.startsWith(allowed))) {
+      if (allowedOrigins.some(allowed => origin.startsWith(allowed))) {
         callback(null, true);
         return;
       }
 
-      // Reject all other origins
-      callback(new Error(`Origin ${origin} not allowed by CORS`), false);
+      // In strict mode (production), reject unknown origins
+      if (config.CORS_STRICT_MODE) {
+        callback(new Error(`Origin ${origin} not allowed by CORS`), false);
+        return;
+      }
+
+      // In non-strict mode (development), allow other origins with warning
+      callback(null, true);
     },
 
     // Allow credentials (cookies) only when origin is validated
