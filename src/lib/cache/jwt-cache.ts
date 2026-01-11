@@ -8,6 +8,8 @@
  * - Uncached: ~150ms (2 sequential DB calls)
  * - Cached: ~5ms (memory lookup)
  * - 97% latency reduction
+ *
+ * Scale: Perfect for 50-10K users. For 100K+ users, consider distributed cache (Redis).
  */
 
 import { LRUCache } from 'lru-cache';
@@ -27,12 +29,12 @@ export interface CachedAuthContext {
 
 /**
  * LRU Cache for JWT verification results
- * - Max 5000 entries
+ * - Max 10000 entries (increased for better hit rate)
  * - TTL based on token expiration (max 1 hour)
  * - Automatic cleanup of expired entries
  */
 const jwtCache = new LRUCache<string, CachedAuthContext>({
-  max: 5000,
+  max: 10000, // Increased from 5000 for better coverage
   ttl: config.JWT_CACHE_TTL * 1000, // Convert seconds to milliseconds
   updateAgeOnGet: true, // Refresh TTL on access
   updateAgeOnHas: false,
@@ -127,7 +129,7 @@ export function setCachedAuthFailure(token: string): void {
 
 /**
  * Invalidate cached JWT (e.g., on logout)
- * Best effort - warm instances only
+ * Best effort - only affects current instance
  */
 export function invalidateCachedAuth(token: string): void {
   const cacheKey = generateCacheKey(token);
@@ -149,7 +151,7 @@ export function clearAllCachedAuth(): void {
 export function getJWTCacheStats() {
   return {
     size: jwtCache.size,
-    maxSize: 5000,
+    maxSize: 10000,
     negativeCacheSize: negativeCache.size,
     enabled: config.JWT_CACHE_ENABLED,
   };

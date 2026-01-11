@@ -56,6 +56,9 @@ const envSchema = z.object({
   // Optional - Idempotency
   IDEMPOTENCY_ENABLED: z.string().transform(v => v === 'true').default('true'),
   IDEMPOTENCY_TTL: z.string().transform(Number).pipe(z.number().int().positive()).default('86400'),
+
+  // Optional - Pagination
+  MAX_PAGE_LIMIT: z.string().transform(Number).pipe(z.number().int().positive()).default('100'),
 });
 
 /**
