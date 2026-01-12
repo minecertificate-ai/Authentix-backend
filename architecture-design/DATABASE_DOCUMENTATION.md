@@ -1,963 +1,917 @@
-# AUTHENTIX DATABASE + STORAGE DOCUMENTATION 
+# Authentix — Database Design & Storage Architecture 
 
-## 0) High-level goals the schema supports
+This document is the **single source of truth** for Authentix’s Supabase **Postgres schema + Storage** layout.
+It explains **why each table exists**, what each column means at a **business level**, how tables relate, and how **RLS + Storage policies** enforce multi‑tenancy.
 
-Authentix is a **multi-tenant certificate generation platform** where each **organization** can:
-
-* Upload certificate templates (PDF/DOCX/PPTX/images)
-* Define fields (name, dates, QR, custom fields, etc.) with **versioning**
-* Import recipients data (CSV/XLSX + manual in future)
-* Generate certificates in bulk and store each generated certificate
-* Send certificates via **WhatsApp / Email** with **delivery status tracking**
-* Track certificate verification scans/events
-* Track billing (trial, subscription, per-certificate usage, invoices, payments, refunds)
-* Maintain security audit trails (who did what, when)
-
-RLS is enabled on most public tables so tenants can only see their organization’s data.
+> **Important security note:** User passwords and password reset flows are handled by **Supabase Auth** (`auth.users`).  
+> Authentix **must not** store passwords in public tables.
 
 ---
 
-## 1) Core tenant identity & access control
+## 1) Core concepts & conventions
 
-### 1.1 `organizations`
+### Multi‑tenancy
+Every tenant is an **organization**.
+Most tables contain `organization_id` and are protected by **Row Level Security (RLS)** using helper functions (notably `is_member_of_org(org_id)`).
 
-Represents a tenant/company using the platform.
+### IDs & timestamps
+- Primary keys are UUIDs (`gen_random_uuid()`).
+- Timestamps use `timestamptz` with `created_at` and (where needed) `updated_at`, `deleted_at`.
+- “Soft delete” is represented by `deleted_at` (row remains for audit/history).
 
-Key columns (typical use):
-
-* `id` (uuid): Primary identifier for multi-tenancy. Used everywhere as `organization_id`.
-* `name`: Display name (e.g., “YHills”).
-* `business_name`: Legal name (e.g., “YHills Pvt Ltd”).
-* `email`, `phone`: Org contact details.
-* `slug`: **Unique** org slug (you chose US spelling + 16-char style). Used for invoice numbers and clean identifiers.
-* `application_id`: Unique “application id” used for external integrations (public identifier).
-* `api_key_hash` or similar (if present): Stores hashed API key (never store raw).
-* `organization_type` / `industry` fields (if present): Org domain (edtech/fintech/etc.)
-* Address fields (line1/line2/city/state/postal/country/tax_id): billing + compliance.
-* Billing status fields (e.g. `billing_status`, trial flags if present): used for gating usage.
-* `certificate_prefix`, `certificate_number_format` (if present): Used by `next_certificate_number()` to generate certificate numbers like `XEN-<org_slug>-000001` or course-specific prefix.
-* `created_at`, `updated_at`, `deleted_at`: lifecycle tracking.
-
-Purpose:
-
-* Single source of truth for org identity + billing configuration + certificate numbering defaults.
+### Status enums
+State transitions are encoded using enums, so that UI + backend can reliably filter and enforce valid states.
 
 ---
 
-### 1.2 `profiles`
+## 2) Authentication model (Supabase Auth + app profiles)
 
-Maps user identity to application profile fields (Supabase Auth handles password).
+### Supabase Auth (`auth` schema)
+Supabase Auth manages:
+- Sign up / sign in
+- Password hashing + reset flows
+- Email verification / email change flows
+- Sessions
+
+### App profile layer (`public.profiles`)
+Authentix stores only **app‑level profile fields** (name, etc.) and ties them to `auth.users.id`.
+
+---
+
+## 3) Storage model (Supabase Storage bucket: `authentix`)
+
+### Bucket
+- Bucket name: **`authentix`**
+- Bucket should be **private**
+- Access is controlled through RLS policies on `storage.objects`
+
+### Required path convention (enforced by your storage policies)
+Every stored object path must be scoped by org UUID and one of the approved roots:
+
+```
+(org_branding|certificate_templates|file_imports|certificates|exports|deliveries|invoices)/<org_uuid>/...
+```
+
+This guarantees:
+- Users can only access files under their organization folder
+- Cross‑tenant access is blocked at the database policy layer
+
+### Folder roots (you created these as prefixes)
+- `org_branding/` — organization assets (logos, stamps, signatures)
+- `certificate_templates/` — uploaded templates + previews (versioned)
+- `file_imports/` — uploaded CSV/XLSX (and optional normalized exports)
+- `certificates/` — generated certificates (PDF + optional preview)
+- `exports/` — bulk zip exports for jobs
+- `deliveries/` — optional delivery artifacts (attachments/copies)
+- `invoices/` — generated invoice PDFs
+
+### Example structure for a single org
+```
+certificate_templates/<org_id>/<template_id>/v0001/source.pdf
+certificate_templates/<org_id>/<template_id>/v0001/previews/preview.webp
+
+file_imports/<org_id>/<import_job_id>/original.xlsx
+
+certificates/<org_id>/<job_id>/<recipient_id>/<certificate_id>.pdf
+exports/<org_id>/<job_id>/bulk.zip
+
+deliveries/<org_id>/<delivery_message_id>/attachments/<file_id>.pdf
+
+org_branding/<org_id>/logos/logo.webp
+org_branding/<org_id>/stamps/stamp_1.png
+org_branding/<org_id>/signatures/signature_1.png
+
+invoices/<org_id>/<yyyy>/<mm>/XEN-<org_slug>-000001.pdf
+```
+
+### How “folders” work in Supabase Storage
+Storage folders are **virtual**. You don’t truly “create a folder” — it appears automatically when you upload the first file with that prefix.
+Creating empty placeholder objects is optional (you already created prefixes for clarity).
+
+### Serving files safely
+Recommended:
+- Keep bucket private
+- Generate **signed URLs** server‑side with short TTL for downloads/previews
+- Never expose raw storage paths directly in the client
+
+---
+
+## 4) Schema overview
+
+### 4.1 Table inventory (public schema)
+These are the tables currently present in `public`:
+
+- `app_audit_logs`
+- `billing_credits_debits`
+- `billing_invoice_items`
+- `billing_invoices`
+- `billing_orders`
+- `billing_payments`
+- `billing_periods`
+- `billing_price_books`
+- `billing_provider_events`
+- `billing_refunds`
+- `billing_usage_events`
+- `certificate_categories`
+- `certificate_generation_jobs`
+- `certificate_subcategories`
+- `certificate_template_fields`
+- `certificate_template_versions`
+- `certificate_templates`
+- `certificate_verification_events`
+- `certificates`
+- `dashboard_stats_cache`
+- `delivery_integration_secrets`
+- `delivery_integrations`
+- `delivery_message_items`
+- `delivery_messages`
+- `delivery_provider_webhook_events`
+- `delivery_templates`
+- `file_import_jobs`
+- `file_import_rows`
+- `files`
+- `generation_job_recipients`
+- `generation_job_templates`
+- `industries`
+- `invoice_line_items`
+- `organization_invitations`
+- `organization_members`
+- `organization_pricing_overrides`
+- `organization_roles`
+- `organizations`
+- `profiles`
+- `role_permissions`
+
+### 4.2 Enum inventory (public schema)
+- `billing_invoice_status`
+- `billing_line_item_type`
+- `billing_order_status`
+- `billing_payment_status`
+- `billing_period_status`
+- `billing_provider`
+- `billing_refund_status`
+- `certificate_status`
+- `delivery_channel`
+- `delivery_secret_type`
+- `delivery_status`
+- `file_kind`
+- `import_status`
+- `invite_status`
+- `job_status`
+- `member_status`
+- `organization_billing_status`
+- `provider_event_status`
+- `template_field_type`
+- `template_status`
+
+### 4.3 Key helper functions (public schema)
+Below are the most important functions/triggers you have in your database (business meaning, not internal Postgres helper functions):
+
+- `after_invoice_item_change()`
+- `append_audit_log()`
+- `apply_payment_to_invoice()`
+- `assert_period_open()`
+- `can_issue_certificate()`
+- `create_invoice_for_period()`
+- `current_user_id()`
+- `enforce_import_job_org()`
+- `enforce_import_job_taxonomy()`
+- `enforce_job_template_org()`
+- `enforce_job_template_taxonomy()`
+- `ensure_billing_period()`
+- `ensure_billing_periods_for_month()`
+- `generate_api_key()`
+- `get_org_effective_pricing()`
+- `get_user_role()`
+- `handle_new_user()`
+- `increment_template_version()`
+- `is_member_of_org()`
+- `mark_expired_certificates()`
+- `next_certificate_number()`
+- `next_invoice_number()`
+- `prevent_environment_downgrade()`
+- `recompute_invoice_totals()`
+- `record_certificate_usage_event()`
+- `revoke_certificate()`
+- `set_updated_at()`
+- `sha256_hex()`
+- `update_certificate_expiry_status()`
+- `update_updated_at_column()`
+- `validate_certificate_category_hierarchy()`
+- `verify_api_key()`
+- `verify_certificate()`
+
+---
+
+## 5) Detailed table documentation (purpose, columns, relationships)
+
+### 5.1 Organizations, users, roles
+
+#### `organizations`
+**Purpose:** Tenant identity + org profile + billing defaults + numbering defaults.
+
+Key columns:
+- `id` — organization UUID; the tenant boundary.
+- `name`, `business_name` — display/legal name.
+- `email`, `phone` — org contact details.
+- `slug` — unique org slug (used for invoice/cert numbering; also nice URLs).
+- `application_id` — public identifier used for external integrations.
+- `api_key_hash` (or equivalent) — hashed API key (never store raw).
+- `industry_id` (recommended / if present) — chosen industry; used to drive available categories.
+- Address fields — billing/compliance.
+- Certificate numbering config (if present): prefix/format.
+- Billing/trial fields (if present): trial window, free cert limit, billing status.
+- `created_at`, `updated_at`, `deleted_at`.
+
+Relationships:
+- 1 organization → many templates/import jobs/jobs/certificates/deliveries/invoices/billing events.
+- Access is enforced via `organization_members` + RLS.
+
+#### `profiles`
+**Purpose:** App-visible user profile. One row per authenticated user.
 
 Typical columns:
+- `id` — equals `auth.users.id` (UUID).
+- `first_name`, `last_name` (and optional display fields).
+- `created_at`, `updated_at`.
 
-* `id` (uuid): **Same as `auth.users.id`**. (One-to-one mapping).
-* `first_name`, `last_name`: User details.
-* `email`: Usually mirrors auth email, used for display/search.
-* `created_at`, `updated_at`: profile lifecycle.
+**Not stored here:** passwords (Supabase Auth).
 
-Purpose:
-
-* App-visible user metadata.
-* **Passwords are not stored here** (handled by Supabase Auth).
-
----
-
-### 1.3 `organization_members`
-
-Links users to organizations with status + username + role reference.
+#### `organization_members`
+**Purpose:** Membership mapping (user ↔ organization) + username + role assignment.
 
 Typical columns:
+- `id`
+- `organization_id`
+- `user_id` — `auth.users.id`
+- `username` — unique per organization.
+- `role_id` — FK to `organization_roles`.
+- `status` — membership state (enum).
+- `created_at`, `updated_at`, `deleted_at`.
 
-* `id`: membership row id.
-* `organization_id`: tenant scope.
-* `user_id`: Supabase auth user id.
-* `username`: **Unique per organization** (supports “same username across different orgs”).
-* `status`: membership state (active/invited/removed/etc).
-* `role_id`: FK to `organization_roles`.
-* `created_at`, `updated_at`, `deleted_at`.
+RLS:
+- Used by `is_member_of_org()` and most policies.
 
-Purpose:
-
-* Multi-tenant membership model.
-* Used by RLS helper functions like `is_member_of_org()` and policy checks.
-
----
-
-### 1.4 `organization_invitations`
-
-Tracks invited teammates.
+#### `organization_invitations`
+**Purpose:** Track invitations for teammates (and allow resends/expiry).
 
 Typical columns:
+- `id`
+- `organization_id`
+- `email` — invited email.
+- `role_id` — invited role.
+- `status` — invite status enum.
+- `token_hash` (if present) — hashed invite token.
+- `expires_at`
+- timestamps
 
-* `id`
-* `organization_id`
-* `email` (citext): invite target email.
-* `role_id` or role key reference: requested role for invited user.
-* `status` (invite_status enum): pending/accepted/expired/etc.
-* `token_hash` (if present): secure invite token hash (never store token raw).
-* `expires_at`: invitation TTL.
-* `created_at`, `updated_at`.
+#### `organization_roles`
+**Purpose:** Role definitions per org (owner/admin/member, and future custom roles).
 
-Purpose:
+Typical columns:
+- `id`
+- `organization_id`
+- `key` — stable identifier (`owner`, `admin`, `member`, …).
+- `name` — display label.
+- `is_system` — true for default roles.
+- timestamps
 
-* Invite flow + audit trail for onboarding.
+#### `role_permissions`
+**Purpose:** Permission keys per role (future-proof RBAC).
 
----
-
-### 1.5 `organization_roles` and `role_permissions`
-
-Role system for future-proof access control.
-
-`organization_roles` typical columns:
-
-* `id`
-* `organization_id`
-* `key` (e.g. owner/admin/member)
-* `name` (UI display)
-* `is_system`: true for built-in roles
-* timestamps
-
-`role_permissions` typical columns:
-
-* `role_id`
-* `permission` (string permission key, e.g. `billing.manage`, `certificates.download`)
-* Composite PK (role_id, permission)
-
-Purpose:
-
-* Flexible RBAC: roles can evolve without schema redesign.
+Typical columns:
+- `role_id`
+- `permission` — string key like `billing.manage`, `certificates.download`, `deliveries.send`, …
+- Composite PK `(role_id, permission)`.
 
 ---
 
-## 2) Taxonomy (Industry → Category → Subcategory)
+### 5.2 Taxonomy (industry → categories → subcategories)
 
-These are reference tables (RLS disabled is okay if they’re global/static).
+These tables are typically global reference data; RLS is disabled (readable to all).
 
-### 2.1 `industries`
+#### `industries`
+**Purpose:** Industry grouping (start with edtech; expand later).
 
 Columns:
+- `id`
+- `key` — stable slug like `edtech`
+- `name` — label like `Education`
+- `created_at`
 
-* `id`
-* `key` (unique, constrained pattern like `edtech`)
-* `name`
-* `created_at`
-
-Purpose:
-
-* Allows expanding beyond edtech later.
-
----
-
-### 2.2 `certificate_categories`
+#### `certificate_categories`
+**Purpose:** Category list inside an industry.
 
 Columns:
+- `id`
+- `industry_id` — FK → `industries.id`
+- `key` — stable slug (`course_completion`, `training_certificate`, …)
+- `name` — display name
+- `created_at`
 
-* `id`
-* `industry_id` (FK)
-* `key` (unique per industry)
-* `name`
-* `created_at`
+Indexes:
+- `(industry_id, key)` unique
+- `idx_cert_cat_industry` for fast filter
 
-Purpose:
-
-* Certificate “type” grouping (course_completion/training/internship/etc).
-
----
-
-### 2.3 `certificate_subcategories`
+#### `certificate_subcategories`
+**Purpose:** Course/domain list inside a category.
 
 Columns:
+- `id`
+- `category_id` — FK → `certificate_categories.id`
+- `key` — stable slug (`web_development`, `ai`, …)
+- `name`
+- `created_at`
 
-* `id`
-* `category_id` (FK)
-* `key` (unique per category)
-* `name`
-* `created_at`
+Indexes:
+- `(category_id, key)` unique
+- `idx_cert_subcat_cat`
 
-Purpose:
-
-* Course/domain grouping inside categories (web_dev, data_science, etc).
-* Used for filtering templates, imports, certificates, analytics.
+> **Org-specific renames / add / delete:**  
+> If you implemented org-scoped overrides for taxonomy (recommended), document them in a dedicated section (see “Org taxonomy customization” in Appendix).
 
 ---
 
-## 3) Files and Storage mapping
+### 5.3 Files + storage registry
 
-### 3.1 `files`
+#### `files`
+**Purpose:** Canonical registry row for every storage object (uploads + generated artifacts).
 
-Central registry for **every uploaded/generated file** stored in Supabase Storage.
+Columns (business meaning):
+- `id`
+- `organization_id`
+- `kind` (`file_kind`) — what this file represents (template source, template preview, import original, certificate pdf, invoice pdf, export zip, branding asset, etc.)
+- `bucket` — should be `authentix`
+- `path` — storage object path (must follow storage policy format)
+- `mime_type` — content type used for download and validation
+- `size_bytes` — optional (enforce quotas/monitoring)
+- `original_name` — the user’s uploaded filename
+- `checksum` / hash — optional integrity/dedup
+- `created_by` — user who uploaded/generated (if present)
+- `created_at`
+
+Key constraints / indexes:
+- Unique `(bucket, path)` to prevent duplicates.
+- Indexes on `(organization_id, created_at desc)` and `(organization_id, kind)` for listing/filtering.
+
+---
+
+### 5.4 Templates + field versioning
+
+#### `certificate_templates`
+**Purpose:** Template container (stable identity across versions).
 
 Typical columns:
+- `id`
+- `organization_id`
+- `category_id`, `subcategory_id` — taxonomy binding
+- `name` — UI name
+- `status` (`template_status`) — draft/active/archived
+- `current_version_id` or `current_version_number` (if present)
+- timestamps
 
-* `id`: file record id.
-* `organization_id`: tenant scope.
-* `kind` (file_kind enum): what the file represents (template_source, template_preview, import_original, certificate_pdf, invoice_pdf, etc).
-* `bucket`: should be `authentix` for new storage.
-* `path`: object path in bucket (e.g. `certificate_templates/<org_id>/<template_id>/v0001/source.pdf`).
-* `mime_type`: stored for safety / correct downloads.
-* `size_bytes`: optional, used for validation/monitoring.
-* `checksum` / `hash` if present: tamper detection/dedup.
-* `original_name`: original filename (sanitized).
-* `created_by`: user id that uploaded/created it (if present).
-* `created_at`
+Indexes:
+- org listings: `(organization_id, created_at desc)`
+- filter: `(organization_id, category_id, subcategory_id)`
 
-Purpose:
-
-* One place to attach storage objects to business entities safely.
-* Enables audit, cleanup, and signed URL serving.
-
----
-
-### 3.2 Storage bucket: `authentix`
-
-Bucket is private and access is controlled by RLS policies on `storage.objects`.
-
-#### Required path convention enforced by policy
-
-Object name must match:
-`^(org_branding|certificate_templates|file_imports|certificates|exports|deliveries|invoices)/<org_uuid>/...`
-
-That means every stored object is scoped by org UUID.
-
----
-
-## 4) Certificate templates & versioning
-
-### 4.1 `certificate_templates`
-
-Represents a template “container” under an org.
+#### `certificate_template_versions`
+**Purpose:** Every template update creates a new immutable version.
 
 Typical columns:
+- `id`
+- `template_id`
+- `version_number` (int) — incremented by trigger
+- `source_file_id` — FK → `files.id` (uploaded template file)
+- `preview_file_id` — FK → `files.id` (rendered preview)
+- `meta`/`metadata` jsonb — page sizes, page count, etc.
+- `created_at`
 
-* `id`
-* `organization_id`
-* `category_id`, `subcategory_id`: taxonomy binding (critical).
-* `name`: template display name.
-* `status` (template_status enum): draft/active/archived/etc.
-* `current_version_id` or current version number (if present)
-* `created_at`, `updated_at`, `deleted_at`
+Indexes:
+- unique `(template_id, version_number)`
+- `idx_template_versions_template`
 
-Purpose:
-
-* Stable template identity across revisions.
-* Filters and permissions at org/category/subcategory level.
-
----
-
-### 4.2 `certificate_template_versions`
-
-Each update creates a new version record.
+#### `certificate_template_fields`
+**Purpose:** Field placement/config for a template version (versioned).
 
 Typical columns:
+- `id`
+- `template_version_id`
+- `field_key` — stable key used for import mapping (`recipient_name`, `course_name`, `custom_1`, …)
+- `field_type` (`template_field_type`) — text/date/qrcode/image/etc
+- `label` — user-friendly label (supports custom renames)
+- `config` jsonb — coordinates, font, styling, QR design options, etc.
+- `is_required`
+- timestamps
 
-* `id`
-* `template_id`
-* `version_number` (incremented by trigger `increment_template_version`)
-* `source_file_id` (FK to `files`): the uploaded PDF/DOCX/PPTX/image.
-* `preview_file_id` (FK to `files`): generated preview image/webp.
-* `metadata` jsonb: template settings at that version (page count, canvas size, etc).
-* `created_at`
-
-Purpose:
-
-* You can see history and later support revert/compare.
+Indexes:
+- unique `(template_version_id, field_key)`
+- `idx_template_fields_version`
 
 ---
 
-### 4.3 `certificate_template_fields`
+### 5.5 Importing data
 
-Stores the “design fields” a user placed for a template version.
+#### `file_import_jobs`
+**Purpose:** One row per uploaded import file (CSV/XLSX) or manual batch.
 
 Typical columns:
+- `id`
+- `organization_id`
+- `category_id`, `subcategory_id`
+- `status` (`import_status`)
+- `original_file_id` — FK → `files.id`
+- `summary` jsonb — totals, errors, mapping info
+- `created_by`
+- timestamps
 
-* `id`
-* `template_version_id`
-* `field_key`: stable key used in imports and mapping (e.g. `recipient_name`, `course_name`, `custom_1`)
-* `field_type` (template_field_type enum): text/date/qrcode/image/etc.
-* `label`: user-friendly label shown in UI (important for renamed custom fields).
-* `config` jsonb: coordinates, font size, alignment, QR options, etc.
-* `is_required`
-* `created_at`, `updated_at`
+Indexes:
+- org list: `(organization_id, created_at desc)`
+- filter: `(organization_id, category_id, subcategory_id)`
 
-Purpose:
-
-* Drives both sample import files and generation pipeline.
-* Versioned so old generated certificates can reference exact settings.
-
----
-
-## 5) Importing data
-
-### 5.1 `file_import_jobs`
-
-One record per uploaded import file (CSV/XLSX) or manual batch in future.
+#### `file_import_rows`
+**Purpose:** Store normalized rows for resend/debug/history.
 
 Typical columns:
+- `id`
+- `import_job_id`
+- `row_index` — row number; unique within job
+- `data` jsonb — normalized record for generation
+- `errors` jsonb — per-row validation issues (optional)
+- `created_at`
 
-* `id`
-* `organization_id`
-* `category_id`, `subcategory_id`: ensures import is tied to taxonomy.
-* `template_id` / `template_version_id` (if present): optional but useful to tie import directly.
-* `status` (import_status enum): uploaded/processing/ready/failed/etc.
-* `original_file_id` (FK to `files`): points to uploaded CSV/XLSX.
-* `summary` jsonb: counts, errors.
-* `created_by`
-* `created_at`, `updated_at`
-
-Purpose:
-
-* Tracks lifecycle of “data upload” step.
-* Makes “Imported Data” dashboard possible.
+Indexes:
+- unique `(import_job_id, row_index)`
+- `idx_file_import_rows_job`
 
 ---
 
-### 5.2 `file_import_rows`
+### 5.6 Generation jobs + certificates
 
-Stores normalized rows from import for resend/debug/history.
+#### `certificate_generation_jobs`
+**Purpose:** Track a bulk generation request (progress + grouping).
 
 Typical columns:
+- `id`
+- `organization_id`
+- `status` (`job_status`) — queued/processing/completed/failed
+- `category_id`, `subcategory_id`
+- `import_job_id` (recommended / if present) — link to the data batch
+- `created_by`
+- timestamps
+- `options` jsonb — zip threshold, include previews, delivery options, etc.
 
-* `id`
-* `import_job_id`
-* `row_index`: row number (unique per job).
-* `data` jsonb: normalized key/value pair data.
-* `errors` jsonb: row validation errors if any.
-* `created_at`
+Indexes:
+- `(organization_id, created_at desc)`
 
-Purpose:
-
-* Enables resend / re-generate without re-uploading file.
-* Enables previewing top N rows in UI.
-
----
-
-## 6) Certificate generation & certificates
-
-### 6.1 `certificate_generation_jobs`
-
-Represents a batch generation request.
+#### `generation_job_templates`
+**Purpose:** Attach **multiple templates** to one job (generate 2–4 certificate types per recipient).
 
 Typical columns:
+- `id`
+- `job_id`
+- `template_id`
+- `template_version_id`
+- `category_id`, `subcategory_id`
+- `created_at`
 
-* `id`
-* `organization_id`
-* `status` (job_status enum): queued/processing/completed/failed.
-* `category_id`, `subcategory_id`: taxonomy for this job.
-* `created_by`
-* `created_at`, `updated_at`
-* `options` jsonb: generation options (zip threshold, include previews, etc).
+Indexes:
+- unique `(job_id, template_id, template_version_id)`
+- `idx_job_templates_job`
 
-Purpose:
-
-* Tracks progress + links all outputs.
-
----
-
-### 6.2 `generation_job_templates`
-
-Allows **one job to generate multiple certificate types/templates at once**.
+#### `generation_job_recipients`
+**Purpose:** The recipients list for a job (from import or manual entry).
 
 Typical columns:
+- `id`
+- `job_id`
+- `recipient_name`
+- `recipient_email` (citext)
+- `recipient_phone`
+- `recipient_data` jsonb — all additional merge fields
+- `created_at`
 
-* `id`
-* `job_id`
-* `template_id`
-* `template_version_id`
-* `category_id`, `subcategory_id` (enforced by triggers like `enforce_job_template_taxonomy`)
-* `created_at`
+Indexes:
+- `idx_job_recipients_job`
 
-Purpose:
+#### `certificates`
+**Purpose:** One record per generated certificate (per recipient × per template).
 
-* Supports your requirement: for a single candidate generate **course + training + internship** in one run.
+Key columns:
+- Identity:
+  - `id`, `organization_id`, `generation_job_id`
+  - `template_id`, `template_version_id`
+  - `category_id`, `subcategory_id`
+- Recipient:
+  - `recipient_name`, `recipient_email`, `recipient_phone`
+  - `recipient_data` jsonb
+- Output files:
+  - `certificate_file_id` → `files.id`
+  - `certificate_preview_file_id` → `files.id`
+- Numbering + lifecycle:
+  - `certificate_number` (unique per org)
+  - `issued_at`, `expires_at`
+  - `status` (`certificate_status`)
+  - `revoked_at`
+  - `reissued_from_certificate_id` (FK self-reference)
+- Verification:
+  - `verification_token_hash` (hash only)
+  - `verification_path` (e.g. `/v/<token>`)
+  - `qr_payload_url` (full URL embedded in QR)
+- `created_at`
 
----
+Indexes (core):
+- unique `(organization_id, certificate_number)`
+- unique `verification_token_hash`
+- filter indexes for org, category/subcategory, issued_at, recipient email/phone, expiry scan.
 
-### 6.3 `generation_job_recipients`
-
-Stores recipients for the job (from import rows or manual entry).
-
-Typical columns:
-
-* `id`
-* `job_id`
-* `recipient_name`
-* `recipient_email` (citext)
-* `recipient_phone`
-* `recipient_data` jsonb: full row data (course, dates, custom fields, etc)
-* `created_at`
-
-Purpose:
-
-* Central recipient list to generate certificates and send messages.
-
----
-
-### 6.4 `certificates`
-
-One row per generated certificate (per recipient per template).
-
-Key columns (as in your design):
-
-* `id`
-* `organization_id`
-* `generation_job_id`
-* `template_id`
-* `template_version_id`
-* `category_id`, `subcategory_id`
-
-Recipient identity:
-
-* `recipient_name`
-* `recipient_email`
-* `recipient_phone`
-* `recipient_data` jsonb (extra fields used during render)
-
-Output files:
-
-* `certificate_file_id` (FK files): final PDF
-* `certificate_preview_file_id` (FK files): preview image/webp (optional)
-
-Numbering & lifecycle:
-
-* `certificate_number`: unique per org
-* `issued_at`
-* `expires_at` (nullable)
-* `status` (certificate_status enum): issued/revoked/expired/etc
-* `revoked_at`
-* `reissued_from_certificate_id`: chain of reissues
-
-Verification:
-
-* `verification_token_hash`: hash of secret token
-* `verification_path`: relative path like `/v/<token>`
-* `qr_payload_url`: absolute URL encoded into QR
-
-Purpose:
-
-* Single authoritative record for validity, storage, verification, status, and history.
-
----
-
-### 6.5 `certificate_verification_events`
-
-Stores scans/verify actions for analytics and security.
+#### `certificate_verification_events`
+**Purpose:** Track QR scans + verification activity.
 
 Typical columns:
+- `id`
+- `organization_id`
+- `certificate_id`
+- `scanned_at`
+- `ip_address`, `user_agent` (if present)
+- `result` / `status_snapshot`
+- `metadata` jsonb
 
-* `id`
-* `organization_id`
-* `certificate_id`
-* `scanned_at`
-* `ip_address` / `user_agent` (if present)
-* `result` / status snapshot (verified/invalid/revoked)
-* `metadata` jsonb
-
-Purpose:
-
-* “Verification logs” dashboard section.
-* Helps detect abuse or suspicious scanning.
+Indexes:
+- `(certificate_id, scanned_at desc)`
+- `(organization_id, scanned_at desc)`
 
 ---
 
-## 7) Deliveries (Email + WhatsApp) tracking
+### 5.7 Deliveries (Email + WhatsApp)
 
-### 7.1 `delivery_integrations`
-
-Per-organization provider configuration (NON-secret parts).
+#### `delivery_integrations`
+**Purpose:** Org-level provider configuration (non-secret).
 
 Typical columns:
+- `id`
+- `organization_id`
+- `channel` (`delivery_channel`) — email / whatsapp
+- `provider` — e.g. `meta_cloud`, `smtp`, `sendgrid`
+- `display_name`
+- `is_active`, `is_default`
+- Email identity: `from_email`, `from_name`
+- WhatsApp identity: `whatsapp_phone_number`, `whatsapp_phone_number_id`, `whatsapp_waba_id`
+- `config` jsonb (non-secret)
+- timestamps + `deleted_at`
 
-* `id`
-* `organization_id`
-* `channel` (delivery_channel enum): email/whatsapp
-* `provider`: string key like `meta_cloud`, `smtp`, `sendgrid`
-* `display_name`
-* `is_active`
-* `is_default` (unique per org+channel)
-* Email identity: `from_email`, `from_name`
-* WhatsApp identity: `whatsapp_phone_number`, `whatsapp_phone_number_id`, `whatsapp_waba_id`
-* `config` jsonb: non-secret settings
-* timestamps including `deleted_at`
+Indexes:
+- `(organization_id)`
+- `(organization_id, channel)`
+- unique default per org+channel (partial unique index).
 
-Purpose:
+RLS:
+- org members can read
+- org admins/owners can manage
 
-* Lets org configure which WhatsApp/email provider to use.
-* Safe to read in UI (no secrets).
+#### `delivery_integration_secrets`
+**Purpose:** Secret references stored in Supabase Vault.
 
----
+Columns:
+- `integration_id`
+- `secret_type` (`delivery_secret_type`)
+- `vault_secret_id` (UUID in vault schema)
+- `created_at`
 
-### 7.2 `delivery_integration_secrets`
+Security:
+- **No client policies** recommended.
+- Access should be **service role only**.
 
-Secret references for integrations (tokens/passwords) using Vault.
-
-Typical columns:
-
-* `integration_id`
-* `secret_type` (delivery_secret_type enum): whatsapp_access_token, smtp_password, etc.
-* `vault_secret_id`: UUID of secret stored in Vault
-* `created_at`
-
-Purpose:
-
-* Keeps secrets encrypted and out of public tables.
-* Typically accessed only by backend service role.
-
----
-
-### 7.3 `delivery_templates`
-
-WhatsApp and Email message templates selectable in UI.
+#### `delivery_templates`
+**Purpose:** Message templates selectable in UI with preview.
 
 Typical columns:
+- `id`
+- `organization_id`
+- `channel`
+- `name`
+- `is_active`, `is_default`
+- WhatsApp mapping: `whatsapp_template_name`, `whatsapp_language`
+- Email: `email_subject`
+- `body` (supports variables like `{recipient_name}`)
+- `variables` jsonb (declared variable list)
+- timestamps
 
-* `id`
-* `organization_id`
-* `channel` (email/whatsapp)
-* `name`
-* `is_active`
-* `is_default` (unique per org+channel)
-* WhatsApp mapping: `whatsapp_template_name`, `whatsapp_language`
-* Email: `email_subject`
-* `body`: content with variables (e.g. `{{recipient_name}}`)
-* `variables` jsonb: declared variable list for validation/preview
-* `created_at`, `updated_at`
+RLS:
+- org members can read
+- org admins can manage
 
-Purpose:
-
-* Allows “choose template + preview + send”.
-
----
-
-### 7.4 `delivery_messages`
-
-One message per recipient per channel per job (NOT per certificate).
+#### `delivery_messages`
+**Purpose:** One delivery message per recipient per channel per job (not per certificate).
 
 Typical columns:
+- `id`
+- `organization_id`
+- `generation_job_id`
+- `recipient_id` (FK → `generation_job_recipients.id`)
+- `channel`
+- `status` (`delivery_status`)
+- Destination: `to_email`, `to_phone`
+- Provider: `provider`, `provider_message_id`
+- Timestamps: `queued_at`, `sent_at`, `delivered_at`, `read_at`, `failed_at`
+- Error fields (if present)
+- `created_at`
 
-* `id`
-* `organization_id`
-* `generation_job_id`
-* `recipient_id` (FK to generation_job_recipients or equivalent)
-* `channel`
-* `status` (delivery_status enum): queued/sent/delivered/read/failed
-* `to_email`, `to_phone`
-* `provider`, `provider_message_id`
-* Timestamps: `queued_at`, `sent_at`, `delivered_at`, `read_at`, `failed_at`
-* `error` / `failure_reason` (if present)
-* `created_at`
+Indexes:
+- org timeline `(organization_id, created_at desc)`
+- per job `(generation_job_id, channel)`
+- recipient lookup
 
-Purpose:
-
-* UI “WhatsApp Messages” and “Email Messages” history page.
-* Supports status tracking from provider webhooks.
-
----
-
-### 7.5 `delivery_message_items`
-
-Links a `delivery_message` to **multiple certificates/files**, enabling:
-
-> send 2–4 certificates to the same recipient in ONE WhatsApp/email.
+#### `delivery_message_items`
+**Purpose:** Attach multiple certificates/files to a single message (send 2–4 certs at once).
 
 Typical columns:
+- `id`
+- `message_id` (FK → `delivery_messages`)
+- `certificate_id` (FK → `certificates`, nullable)
+- `file_id` (FK → `files`, nullable)
+- `created_at`
 
-* `id`
-* `message_id` (FK delivery_messages)
-* `certificate_id` (FK certificates) — optional if attachment is not a certificate
-* `file_id` (FK files) — for attachments
-* Unique constraint `(message_id, certificate_id)` prevents duplicates
-* `created_at`
+Constraints:
+- Unique `(message_id, certificate_id)` to prevent duplicates.
 
-Purpose:
+#### `delivery_provider_webhook_events`
+**Purpose:** Store raw webhook events for audit/debug.
 
-* Supports “send all certificates at once” requirement.
+Columns:
+- `id`
+- `organization_id` (nullable if not resolved)
+- `channel`
+- `provider`
+- `provider_message_id`
+- `event_type`
+- `payload` jsonb
+- `received_at`
+
+Indexes:
+- `(organization_id, received_at desc)`
+- `(provider, provider_message_id)`
 
 ---
 
-### 7.6 `delivery_provider_webhook_events`
+### 5.8 Billing (trial + subscription + pay-per-certificate)
 
-Stores raw webhook events from providers (minimal audit/debug, not “over logging”).
+Billing is **pay-as-you-go + subscription**:
+- Monthly platform fee (default 399 INR + GST)
+- Per certificate fee (default 10 INR + GST)
+- Pricing can be overridden per org
+- Trial: 7 days + 10 free certificates (customizable per org)
+- Invoice numbering: `XEN-<org_slug>-NNNNNN`
+
+#### `billing_price_books`
+**Purpose:** Default price book(s) (start with “startup”; expand later).
 
 Typical columns:
+- `id`
+- `key` (e.g. `startup`)
+- Currency + unit prices
+- Default GST rate
+- `created_at`
 
-* `id`
-* `organization_id` (nullable if unknown)
-* `channel`
-* `provider`
-* `provider_message_id`
-* `event_type` (sent/delivered/read/failed)
-* `payload` jsonb
-* `received_at`
-
-Purpose:
-
-* Proof and debugging when a user says “I didn’t get it”.
-* Lets you reconcile statuses without spamming application logs.
-
----
-
-## 8) Billing (Pay-as-you-go + subscription + trial)
-
-This schema supports:
-
-* Monthly platform subscription (default 399 INR + GST)
-* Per-certificate fee (default 10 INR + GST, only when certificate is generated)
-* Org-specific pricing overrides
-* Trial: 7 days + 10 free certificates (and customizable per org later)
-* Razorpay-based payments + provider event tracking
-* Invoice numbering: `XEN-<org_slug>-NNNNNN`
-
-### 8.1 `billing_price_books`
-
-Defines named pricing plans (even if you have only one right now).
+#### `organization_pricing_overrides`
+**Purpose:** Org-specific pricing overrides (special deals).
 
 Typical columns:
+- `id`
+- `organization_id`
+- `effective_from`, `effective_to`
+- override values: platform fee, waived flag, per certificate fee, gst override
+- `created_at`
 
-* `id`
-* `key` (e.g. `startup`)
-* currency fields and base pricing values
-* `created_at`
+#### `billing_periods`
+**Purpose:** Monthly billing periods per org.
 
-Purpose:
+Columns:
+- `id`
+- `organization_id`
+- `period_start`, `period_end`
+- `status` (`billing_period_status`)
+- timestamps
 
-* Central default pricing that applies to all orgs unless overridden.
+Constraints:
+- unique `(organization_id, period_start)`
 
----
+#### `billing_usage_events`
+**Purpose:** Metered usage (certificate generation).
 
-### 8.2 `organization_pricing_overrides`
+Columns:
+- `id`
+- `organization_id`
+- `period_id`
+- `event_type` / usage type
+- `certificate_id` (nullable)
+- `occurred_at`
+- `quantity`
+- `metadata` jsonb
 
-Allows you (admin) to override pricing per org.
+Indexes:
+- org+period and org+time indexes.
 
-Typical columns:
+#### `billing_invoices`
+**Purpose:** Invoice header (one per period, plus ad-hoc invoices if needed).
 
-* `id`
-* `organization_id`
-* effective dates (`effective_from`, `effective_to`)
-* override values:
+Columns:
+- `id`
+- `organization_id`
+- `period_id` (nullable)
+- `invoice_number` (unique)
+- `issue_date`
+- `status` (`billing_invoice_status`)
+- totals (subtotal/gst/total/paid/due)
+- timestamps
 
-  * platform fee waived or custom
-  * per certificate fee custom
-  * gst rate override if needed
-* `created_at`
+Constraints:
+- unique `invoice_number`
+- unique `(organization_id, period_id)` when period_id not null.
 
-Purpose:
+#### `billing_invoice_items`
+**Purpose:** Invoice line items.
 
-* “Special deal per customer” support without code hacks.
+Columns:
+- `id`
+- `invoice_id`
+- `line_item_type` (`billing_line_item_type`)
+- `description`
+- `quantity`
+- unit price + amount
+- timestamps
 
----
+Trigger:
+- `after_invoice_item_change` recomputes totals.
 
-### 8.3 `billing_periods`
+#### `billing_orders`
+**Purpose:** Provider order intent (Razorpay order).
 
-One row per org per month billing period.
+Columns:
+- `id`
+- `organization_id`
+- `razorpay_order_id` (unique)
+- `amount_paise`, `currency`
+- `status` (`billing_order_status`)
+- `created_at`
 
-Typical columns:
+#### `billing_payments`
+**Purpose:** Captured payments.
 
-* `id`
-* `organization_id`
-* `period_start` (date)
-* `period_end` (date)
-* `status` (billing_period_status enum): open/closed/invoiced/paid etc
-* timestamps
+Columns:
+- `id`
+- `organization_id`
+- `razorpay_payment_id` (unique)
+- amount + currency
+- `status` (`billing_payment_status`)
+- timestamps
 
-Purpose:
+#### `billing_refunds`
+**Purpose:** Refund records.
 
-* Normalizes monthly billing timeline and invoice grouping.
+Columns:
+- `id`
+- `organization_id`
+- `razorpay_refund_id` (unique)
+- amount + currency
+- `status` (`billing_refund_status`)
+- timestamps
 
----
+#### `billing_provider_events`
+**Purpose:** Raw billing webhooks (idempotency + audit).
 
-### 8.4 `billing_usage_events`
+Columns:
+- `id`
+- `organization_id`
+- `provider` (`billing_provider`)
+- `payload_hash` (unique)
+- `payload` jsonb
+- `status` (`provider_event_status`)
+- `received_at`
 
-Usage signals (e.g., certificate generated) recorded as events.
+#### `billing_credits_debits`
+**Purpose:** Manual adjustments (credits/debits).
 
-Typical columns:
+Columns:
+- `id`
+- `organization_id`
+- amount + reason
+- `created_at`
 
-* `id`
-* `organization_id`
-* `period_id`
-* event type (e.g. certificate_generated)
-* `certificate_id` (nullable FK)
-* `occurred_at`
-* `quantity`
-* metadata jsonb
+#### `invoice_line_items`
+**Purpose:** Certificate-level invoice linkage (your schema includes both billing_* and invoice_line_items for certificate attribution).
 
-Purpose:
-
-* Drives per-certificate billing and auditability.
-
----
-
-### 8.5 `billing_invoices` & `billing_invoice_items`
-
-Invoice header and detailed line items.
-
-`billing_invoices` typical columns:
-
-* `id`
-* `organization_id`
-* `period_id` (nullable)
-* `invoice_number` (unique) using format `XEN-<org_slug>-000001`
-* `issue_date`
-* `status` (billing_invoice_status enum)
-* totals: subtotal, gst, total, paid amount, due amount
-* `created_at`
-
-`billing_invoice_items` typical columns:
-
-* `id`
-* `invoice_id`
-* `line_item_type` (billing_line_item_type): subscription, per_certificate, credit, debit
-* description
-* quantity, unit price, amount
-* `created_at`
-
-Purpose:
-
-* Produces invoice PDF + UI billing history.
-
----
-
-### 8.6 `billing_orders`, `billing_payments`, `billing_refunds`
-
-Provider payment lifecycle records (Razorpay).
-
-`billing_orders`:
-
-* org_id
-* provider order id (`razorpay_order_id`)
-* amount, currency
-* status (billing_order_status)
-* created_at
-
-`billing_payments`:
-
-* org_id
-* provider payment id (`razorpay_payment_id`)
-* amount, currency
-* status (billing_payment_status)
-* created_at
-
-`billing_refunds`:
-
-* org_id
-* provider refund id (`razorpay_refund_id`)
-* amount, status (billing_refund_status)
-* created_at
-
-Purpose:
-
-* Payment reconciliation and proof.
+Typical use:
+- link `invoice_id` to `certificate_id` (nullable)
+- provide detailed invoice table view
+- indexed for certificate lookups
 
 ---
 
-### 8.7 `billing_provider_events`
+### 5.9 Analytics cache
 
-Raw provider events (webhooks) to ensure idempotency + traceability.
+#### `dashboard_stats_cache`
+**Purpose:** Store precomputed dashboard numbers.
 
-Typical columns:
+Columns:
+- `organization_id` (PK)
+- `stats` jsonb
+- `computed_at`
 
-* `id`
-* `organization_id`
-* provider enum (billing_provider)
-* `payload_hash` (unique) prevents double-processing
-* payload jsonb
-* status (provider_event_status)
-* `received_at`
-
-Purpose:
-
-* Robust webhook ingestion and audit.
+RLS:
+- RLS disabled is acceptable if you only access through backend; otherwise enable and add policies.
 
 ---
 
-### 8.8 `billing_credits_debits`
+### 5.10 Security audit
 
-Manual adjustments (credits/debits) applied to accounts.
+#### `app_audit_logs`
+**Purpose:** Minimal, security‑relevant audit trail.
 
-Typical columns:
+Columns:
+- `id`
+- `organization_id`
+- `actor_user_id`
+- `action`
+- `entity_type`
+- `entity_id`
+- `severity`
+- `metadata` jsonb (no secrets)
+- `created_at`
 
-* `id`
-* `organization_id`
-* amount
-* reason
-* created_at
+Indexes:
+- `(organization_id, created_at desc)`
+- `(action, created_at desc)`
 
-Purpose:
-
-* Admin-driven billing corrections.
-
----
-
-## 9) Analytics cache
-
-### `dashboard_stats_cache`
-
-A cached snapshot of dashboard stats to avoid heavy queries.
-
-Typical columns:
-
-* `organization_id` (PK)
-* computed stats jsonb
-* `computed_at`
-
-Purpose:
-
-* Makes dashboard “instant” without expensive aggregation every page load.
+Function:
+- `append_audit_log(...)` for consistent inserts.
 
 ---
 
-## 10) Security audit logging
+## 6) RLS & policies (how access is enforced)
 
-### `app_audit_logs`
+### RLS enabled tables
+You verified RLS is enabled on most business tables. Reference tables (`industries`, `certificate_categories`, `certificate_subcategories`) intentionally have RLS disabled.
 
-Lightweight, “required only” audit log table (not noisy).
+### Policy model (high level)
+- **Org members** can read most org-scoped tables
+- **Admins/owners** can manage configuration tables (integrations/templates)
+- **Service role** handles secrets + webhook ingestion + status updates
 
-Typical columns:
-
-* `id`
-* `organization_id`
-* `actor_user_id`: who performed action
-* `action`: e.g. `template.uploaded`, `billing.invoice_created`
-* `entity_type`: table/entity category (template, certificate, invoice, etc)
-* `entity_id`: uuid of target entity
-* `severity`: info/warn/high
-* `metadata` jsonb: minimal useful context (no secrets/PII)
-* `created_at`
-
-Purpose:
-
-* Security and compliance tracking without application log spam.
+### Storage policies
+Your `storage.objects` policies for bucket `authentix` enforce:
+- authenticated users only
+- object path must match allowed roots
+- membership must match org UUID extracted from path via regex
 
 ---
 
-## 11) Key public functions and what they are used for
+## 7) Appendix — Operational queries (schema introspection)
 
-* `current_user_id()`
-  Returns the current authenticated user id (auth.uid wrapper used by policies).
+When you want a complete “printout” of schema (tables/columns/indexes/policies/functions), run the schema export query you already used.
+Keep it in your repo so anyone can verify state against this documentation.
 
-* `get_user_role()`
-  Returns role key for current user (used in RLS policies and authorization checks).
+**Quick columns query:**
+```sql
+select
+  table_name,
+  ordinal_position,
+  column_name,
+  data_type,
+  udt_name,
+  is_nullable,
+  column_default
+from information_schema.columns
+where table_schema = 'public'
+order by table_name, ordinal_position;
+```
 
-* `is_member_of_org(org_id)`
-  Returns true if current user is an active member of that org. Used heavily in RLS and storage policies.
+**RLS + policies:**
+```sql
+select c.relname as table_name, c.relrowsecurity as rls_enabled
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relkind = 'r'
+order by c.relname;
 
-* `verify_api_key(provided_key)`
-  Validates API key and returns org id (service-to-service auth support).
-
-* `next_certificate_number(p_organization_id)`
-  Generates next certificate number using org prefix/format rules.
-
-* `next_invoice_number(p_org_id)`
-  Generates invoice number in your chosen format: `XEN-<org_slug>-NNNNNN`.
-
-* `verify_certificate(token)`
-  Given verification token, returns certificate verification payload for public verification page.
-
-* `mark_expired_certificates()`
-  Maintenance function that marks expired certs as expired/revoked status as per your lifecycle.
-
-* `revoke_certificate(p_certificate_id, p_revoked_by, p_reason)`
-  Marks a certificate as revoked while preserving record for audit/history.
-
-* Billing functions:
-
-  * `get_org_effective_pricing(p_org_id, p_at)` → resolves default + overrides
-  * `ensure_billing_period(...)`, `ensure_billing_periods_for_month(...)`
-  * `create_invoice_for_period(...)`
-  * `apply_payment_to_invoice(...)`
-  * `recompute_invoice_totals(...)`
-
-* Enforcement triggers:
-
-  * `enforce_import_job_org`, `enforce_import_job_taxonomy`
-    Ensures import jobs always match org/taxonomy constraints.
-  * `enforce_job_template_org`, `enforce_job_template_taxonomy`
-    Ensures templates attached to jobs belong to the org and match category hierarchy.
-  * `validate_certificate_category_hierarchy`
-    Ensures category/subcategory relationships stay correct.
+select schemaname, tablename, policyname, roles, cmd, qual, with_check
+from pg_policies
+where schemaname in ('public','storage')
+order by schemaname, tablename, policyname;
+```
 
 ---
 
-## 12) Enums (important behavior switches)
-
-You have enums for:
-
-* Template: `template_status`, `template_field_type`
-* Jobs/imports: `job_status`, `import_status`
-* Membership/invite: `member_status`, `invite_status`
-* Certificates: `certificate_status`
-* Delivery: `delivery_channel`, `delivery_status`, `delivery_secret_type`
-* Billing: invoice/order/payment/refund statuses + provider + line item types
-* File classification: `file_kind`
-* Org billing: `organization_billing_status`
-* Provider events: `provider_event_status`
-
-Purpose:
-
-* Keeps status transitions consistent and queryable.
+## 8) What we intentionally do NOT store in public tables
+- Passwords / password reset tokens (Supabase Auth)
+- Raw provider secrets (stored encrypted via Supabase Vault; referenced by IDs)
+- Raw certificate verification tokens (only hashes are stored)
 
 ---
 
-## 13) Storage: folder roots + what each root stores
-
-Bucket: **`authentix`** (private)
-
-Root folders (these must exist as prefixes; you already created them):
-
-1. `org_branding/<org_id>/...`
-
-   * logos: organization logo
-   * stamps: stamp images
-   * signatures: signature assets
-   * optional: brand assets used in certificates/verification pages
-
-2. `certificate_templates/<org_id>/...`
-
-   * template source files (pdf/docx/pptx/images)
-   * preview renders (webp/png)
-   * organized by template_id and version
-
-3. `file_imports/<org_id>/...`
-
-   * original uploaded CSV/XLSX
-   * normalized row exports if you choose to store them (jsonl/csv)
-
-4. `certificates/<org_id>/...`
-
-   * generated certificate outputs (pdf)
-   * optional previews
-
-5. `exports/<org_id>/...`
-
-   * bulk zip exports for generation jobs
-
-6. `deliveries/<org_id>/...`
-
-   * message attachments if you store them separately
-   * delivery artifacts (optional)
-
-7. `invoices/<org_id>/...`
-
-   * generated invoice PDFs named like `XEN-<org_slug>-000001.pdf`
-   * organized by year/month if you want
-
-### Storage access model
-
-* Bucket is private.
-* Access is allowed only when:
-
-  * user is authenticated AND
-  * object path matches allowed roots AND
-  * `is_member_of_org(<org_id extracted from path>)` is true
-
-This prevents cross-tenant access.
-
----
-
-## 14) What is intentionally NOT stored in public tables
-
-* **Passwords**: handled by Supabase Auth (hashing + reset flows).
-* Raw provider secrets: stored in Vault and referenced by `delivery_integration_secrets`.
-* Raw verification tokens: only hashes are stored (`verification_token_hash`).
-
----
-
+## 9) Glossary
+- **Template**: the original certificate design file.
+- **Template version**: immutable snapshot of template + its fields config.
+- **Generation job**: batch request to generate certificates.
+- **Certificate**: one issued credential for one recipient for one template.
+- **Delivery message**: one outbound WhatsApp/email record for one recipient (can attach multiple certificates).
+- **Billing period**: one month per org, used for invoicing.
