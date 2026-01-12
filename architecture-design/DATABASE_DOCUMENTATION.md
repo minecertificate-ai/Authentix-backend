@@ -1,1214 +1,963 @@
-# Database Architecture & Documentation
+# AUTHENTIX DATABASE + STORAGE DOCUMENTATION 
 
-## Overview
+## 0) High-level goals the schema supports
 
-The Authentix platform uses **Supabase** (PostgreSQL) as its primary database and **Supabase Storage** for file storage. The database follows a multi-tenant architecture with company-based isolation.
+Authentix is a **multi-tenant certificate generation platform** where each **organization** can:
 
-## ⚠️ Important Note
+* Upload certificate templates (PDF/DOCX/PPTX/images)
+* Define fields (name, dates, QR, custom fields, etc.) with **versioning**
+* Import recipients data (CSV/XLSX + manual in future)
+* Generate certificates in bulk and store each generated certificate
+* Send certificates via **WhatsApp / Email** with **delivery status tracking**
+* Track certificate verification scans/events
+* Track billing (trial, subscription, per-certificate usage, invoices, payments, refunds)
+* Maintain security audit trails (who did what, when)
 
-This documentation is generated from the **live Supabase schema** and storage metadata:
-- **Generated at:** 2026-01-10T17:20:04.070Z
-- **Schema source:** Supabase PostgREST OpenAPI
-- **Storage source:** Supabase Storage API
-
-Limitations:
-- Indexes, RLS policies, and triggers are not exposed via PostgREST and must be verified via SQL.
-
-## Database Provider
-
-- **Platform**: Supabase (PostgreSQL 15+)
-- **Connection**: Service role client for backend operations
-- **Authentication**: Supabase Auth (JWT-based)
-- **Storage**: Supabase Storage (S3-compatible)
-
-## Storage Structure
-
-### Supabase Storage Bucket: `minecertificate`
-
-**Top-level folders (15)**: `audit-files/`, `branding/`, `bulk-downloads/`, `certificates-previews/`, `certificates/`, `company-logos/`, `email-attachments/`, `enterprise/`, `failed-rows/`, `imports/`, `qrcodes/`, `temp/`, `template-assets/`, `templates-previews/`, `templates/`
-
-**Folder Structure**:
-```
-minecertificate/
-├── audit-files/
-├── branding/
-├── bulk-downloads/
-├── certificates-previews/
-├── certificates/
-├── company-logos/
-├── email-attachments/
-├── enterprise/
-├── failed-rows/
-├── imports/
-├── qrcodes/
-├── temp/
-├── template-assets/
-├── templates-previews/
-└── templates/
-```
-
-**Access Control**:
-- **Bucket Public:** Yes
-- **File Size Limit:** 50 MB
-- **Allowed MIME Types:** `image/png`, `image/jpeg`, `image/webp`, `image/svg+xml`, `application/pdf`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `text/csv`, `text/html`, `text/css`, `application/javascript`, `font/ttf`, `font/woff`, `font/woff2`, `application/zip`
-- Public bucket does not eliminate the use of signed URLs for sensitive assets.
-
-## Database Tables
-
-### 1. `audit_logs`
-
-**Purpose**: Append-only audit log for sensitive actions.
-
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `user_id` (UUID, FOREIGN KEY → users.id) - Reference ID
-- `event_type` (TEXT, NOT NULL)
-- `entity_type` (TEXT)
-- `entity_id` (UUID) - Reference ID
-- `metadata` (JSONB) - JSON object/array
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `action` (TEXT)
-- `old_values` (JSONB) - JSON object/array
-- `new_values` (JSONB) - JSON object/array
-- `ip_address` (INET)
-- `user_agent` (TEXT)
-
-**Relationships**:
-- `company_id` → `companies.id`
-- `user_id` → `users.id`
-
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
-
-**Usage**:
-- Security auditing
-- Operational tracing
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+RLS is enabled on most public tables so tenants can only see their organization’s data.
 
 ---
 
-### 2. `billing_profiles`
+## 1) Core tenant identity & access control
 
-**Purpose**: Per-company pricing and tax profile for invoices.
+### 1.1 `organizations`
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `platform_fee_amount` (DECIMAL, NOT NULL, DEFAULT 1000)
-- `certificate_unit_price` (DECIMAL, NOT NULL, DEFAULT 10)
-- `currency` (TEXT, NOT NULL, DEFAULT INR)
-- `gst_rate` (DECIMAL, NOT NULL, DEFAULT 18)
-- `billing_cycle` (TEXT, NOT NULL, DEFAULT monthly)
-- `razorpay_customer_id` (TEXT) - Reference ID
-- `billing_address` (JSONB) - JSON object/array
-- `auto_pay_enabled` (BOOLEAN)
-- `effective_from` (DATE, NOT NULL, DEFAULT CURRENT_DATE)
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
+Represents a tenant/company using the platform.
 
-**Relationships**:
-- `company_id` → `companies.id`
+Key columns (typical use):
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+* `id` (uuid): Primary identifier for multi-tenancy. Used everywhere as `organization_id`.
+* `name`: Display name (e.g., “YHills”).
+* `business_name`: Legal name (e.g., “YHills Pvt Ltd”).
+* `email`, `phone`: Org contact details.
+* `slug`: **Unique** org slug (you chose US spelling + 16-char style). Used for invoice numbers and clean identifiers.
+* `application_id`: Unique “application id” used for external integrations (public identifier).
+* `api_key_hash` or similar (if present): Stores hashed API key (never store raw).
+* `organization_type` / `industry` fields (if present): Org domain (edtech/fintech/etc.)
+* Address fields (line1/line2/city/state/postal/country/tax_id): billing + compliance.
+* Billing status fields (e.g. `billing_status`, trial flags if present): used for gating usage.
+* `certificate_prefix`, `certificate_number_format` (if present): Used by `next_certificate_number()` to generate certificate numbers like `XEN-<org_slug>-000001` or course-specific prefix.
+* `created_at`, `updated_at`, `deleted_at`: lifecycle tracking.
 
-**Usage**:
-- Billing configuration per tenant
+Purpose:
 
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Single source of truth for org identity + billing configuration + certificate numbering defaults.
 
 ---
 
-### 3. `certificate_categories`
+### 1.2 `profiles`
 
-**Purpose**: Category/subcategory taxonomy for certificate templates.
+Maps user identity to application profile fields (Supabase Auth handles password).
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id) - Reference ID
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
-- `industry` (TEXT)
-- `certificate_category` (TEXT, NOT NULL)
-- `certificate_subcategory` (TEXT, NOT NULL)
+Typical columns:
 
-**Relationships**:
-- `company_id` → `companies.id`
+* `id` (uuid): **Same as `auth.users.id`**. (One-to-one mapping).
+* `first_name`, `last_name`: User details.
+* `email`: Usually mirrors auth email, used for display/search.
+* `created_at`, `updated_at`: profile lifecycle.
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Template categorization
-- Industry-based filtering
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* App-visible user metadata.
+* **Passwords are not stored here** (handled by Supabase Auth).
 
 ---
 
-### 4. `certificate_events`
+### 1.3 `organization_members`
 
-**Purpose**: Append-only timeline of certificate lifecycle events.
+Links users to organizations with status + username + role reference.
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `certificate_id` (UUID, FOREIGN KEY → certificates.id, NOT NULL) - Reference ID
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `event_type` (TEXT, NOT NULL)
-- `actor_type` (TEXT, NOT NULL)
-- `actor_id` (UUID, FOREIGN KEY → users.id) - Reference ID
-- `metadata` (JSONB) - JSON object/array
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
+Typical columns:
 
-**Relationships**:
-- `certificate_id` → `certificates.id`
-- `company_id` → `companies.id`
-- `actor_id` → `users.id`
+* `id`: membership row id.
+* `organization_id`: tenant scope.
+* `user_id`: Supabase auth user id.
+* `username`: **Unique per organization** (supports “same username across different orgs”).
+* `status`: membership state (active/invited/removed/etc).
+* `role_id`: FK to `organization_roles`.
+* `created_at`, `updated_at`, `deleted_at`.
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Certificate lifecycle timeline
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Multi-tenant membership model.
+* Used by RLS helper functions like `is_member_of_org()` and policy checks.
 
 ---
 
-### 5. `certificate_templates`
+### 1.4 `organization_invitations`
 
-**Purpose**: Certificate template metadata and field definitions.
+Tracks invited teammates.
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `name` (TEXT, NOT NULL)
-- `course_name` (TEXT)
-- `file_type` (TEXT, NOT NULL)
-- `storage_path` (TEXT, NOT NULL) - Supabase Storage object path
-- `preview_url` (TEXT) - Preview URL
-- `description` (TEXT)
-- `created_by` (UUID, FOREIGN KEY → users.id)
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `fields` (JSONB) - JSONB array of field configs (x, y, fontSize, fontFamily, color, etc.)
-- `fields_schema_version` (INTEGER, DEFAULT 1) - Schema version for fields array (enables future migrations)
-- `width` (INTEGER)
-- `height` (INTEGER)
-- `certificate_category_id` (UUID, FOREIGN KEY → certificate_categories.id) - Reference ID
-- `version` (INTEGER, DEFAULT 1)
-- `status` (TEXT, DEFAULT active) - Template status: draft (editing), active (usable), archived (hidden)
-- `usage_count` (INTEGER)
-- `last_used_at` (TIMESTAMPTZ) - Timestamp
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
-- `certificate_subcategory_id` (UUID, FOREIGN KEY → certificate_categories.id) - Reference ID
-- `certificate_category` (TEXT) - Snapshot of certificate category at template creation time
-- `certificate_subcategory` (TEXT) - Snapshot of certificate subcategory at template creation time (optional)
-- `industry` (TEXT) - Industry snapshot (e.g. edtech) copied from company at creation time
+Typical columns:
 
-**Relationships**:
-- `company_id` → `companies.id`
-- `created_by` → `users.id`
-- `certificate_category_id` → `certificate_categories.id`
-- `certificate_subcategory_id` → `certificate_categories.id`
+* `id`
+* `organization_id`
+* `email` (citext): invite target email.
+* `role_id` or role key reference: requested role for invited user.
+* `status` (invite_status enum): pending/accepted/expired/etc.
+* `token_hash` (if present): secure invite token hash (never store token raw).
+* `expires_at`: invitation TTL.
+* `created_at`, `updated_at`.
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Template management
-- Field layout storage
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
-
-**Storage**:
-- storage_path stores the template file in Supabase Storage.
-- preview_url stores the public preview URL when available.
+* Invite flow + audit trail for onboarding.
 
 ---
 
-### 6. `certificates`
+### 1.5 `organization_roles` and `role_permissions`
 
-**Purpose**: Issued certificates with verification identifiers and snapshots.
+Role system for future-proof access control.
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `certificate_template_id` (UUID, FOREIGN KEY → certificate_templates.id) - Reference ID
-- `recipient_name` (TEXT, NOT NULL)
-- `recipient_email` (TEXT)
-- `course_name` (TEXT)
-- `issue_date` (DATE, NOT NULL, DEFAULT CURRENT_DATE) - Issue date
-- `expiry_date` (DATE) - Expiry date
-- `certificate_number` (TEXT, NOT NULL)
-- `storage_path` (TEXT, NOT NULL) - Supabase Storage object path
-- `preview_url` (TEXT) - Preview URL
-- `verification_code` (TEXT, NOT NULL)
-- `status` (TEXT, NOT NULL, DEFAULT issued) - Certificate status: issued (valid), revoked (invalidated), expired (past expiry_date)
-- `issued_by` (UUID, FOREIGN KEY → users.id)
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `import_job_id` (UUID) - Reference ID
-- `course_date` (DATE)
-- `custom_fields` (JSONB) - JSON object/array
-- `verification_count` (INTEGER)
-- `last_verified_at` (TIMESTAMPTZ) - Timestamp
-- `pdf_url` (TEXT) - PDF URL
-- `qr_url` (TEXT) - URL
-- `revoke_reason` (TEXT)
-- `verification_token` (TEXT) - Unique token for public verification (embedded in QR code)
-- `template_snapshot` (JSONB) - Frozen snapshot of template at issue time (fields, dimensions, etc.)
-- `recipient_snapshot` (JSONB) - Frozen snapshot of recipient data at issue time
-- `public_url` (TEXT) - Public URL
-- `qr_code_url` (TEXT) - QR code URL
-- `invoice_id` (UUID, FOREIGN KEY → invoices.id) - Reference ID
-- `issued_at` (TIMESTAMPTZ, DEFAULT now()) - Issue timestamp
-- `revoked_at` (TIMESTAMPTZ) - Timestamp
-- `revoked_by` (UUID, FOREIGN KEY → users.id)
-- `revocation_reason` (TEXT)
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
-- `certificate_category_snapshot` (JSONB) - JSON object/array
-- `certificate_subcategory_snapshot` (JSONB) - JSON object/array
+`organization_roles` typical columns:
 
-**Relationships**:
-- `company_id` → `companies.id`
-- `certificate_template_id` → `certificate_templates.id`
-- `issued_by` → `users.id`
-- `invoice_id` → `invoices.id`
-- `revoked_by` → `users.id`
+* `id`
+* `organization_id`
+* `key` (e.g. owner/admin/member)
+* `name` (UI display)
+* `is_system`: true for built-in roles
+* timestamps
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+`role_permissions` typical columns:
 
-**Usage**:
-- Issued certificate registry
-- Verification lookup
+* `role_id`
+* `permission` (string permission key, e.g. `billing.manage`, `certificates.download`)
+* Composite PK (role_id, permission)
 
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+Purpose:
 
-**Storage**:
-- storage_path stores the generated certificate file path (if persisted).
-- pdf_url/public_url/qr_code_url store generated asset URLs when used.
+* Flexible RBAC: roles can evolve without schema redesign.
 
 ---
 
-### 7. `companies`
+## 2) Taxonomy (Industry → Category → Subcategory)
 
-**Purpose**: Tenant/company records and API identity.
+These are reference tables (RLS disabled is okay if they’re global/static).
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `name` (TEXT, NOT NULL)
-- `logo` (TEXT) - Logo URL
-- `email` (TEXT) - Email address
-- `phone` (TEXT) - Phone number
-- `website` (TEXT)
-- `address` (TEXT)
-- `city` (TEXT)
-- `state` (TEXT)
-- `country` (TEXT)
-- `postal_code` (TEXT)
-- `billing_address` (TEXT)
-- `billing_city` (TEXT)
-- `billing_state` (TEXT)
-- `billing_country` (TEXT)
-- `billing_postal_code` (TEXT)
-- `gst_number` (TEXT)
-- `cin_number` (TEXT)
-- `tax_id` (TEXT) - Reference ID
-- `gst_document_url` (TEXT) - URL
-- `cin_document_url` (TEXT) - URL
-- `industry` (TEXT)
-- `company_size` (TEXT)
-- `timezone` (TEXT, DEFAULT UTC)
-- `last_active_at` (TIMESTAMPTZ) - Timestamp
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `application_id` (TEXT, NOT NULL) - Immutable company identifier (format: xen__). Used for API auth and storage paths.
-- `status` (TEXT, DEFAULT active) - Company account status: active, suspended, closed
-- `billing_plan` (TEXT)
-- `api_key_hash` (TEXT) - Bcrypt hash of API key (NEVER store plaintext)
-- `api_enabled` (BOOLEAN)
-- `api_key_created_at` (TIMESTAMPTZ) - Timestamp
-- `api_key_last_rotated_at` (TIMESTAMPTZ) - Timestamp
-- `currency` (TEXT, DEFAULT INR)
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp (NULL = active)
-- `environment` (TEXT, NOT NULL, DEFAULT test) - Logical environment: dev (local), test (staging), beta (pre-prod), prod (production). Used for safety guards, not tenant isolation.
-- `business_type` (TEXT) - Primary business domain of the company. Used to filter certificate categories and subcategories.
+### 2.1 `industries`
 
-**Relationships**:
-- None
+Columns:
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+* `id`
+* `key` (unique, constrained pattern like `edtech`)
+* `name`
+* `created_at`
 
-**Usage**:
-- Tenant management
-- API identity
+Purpose:
 
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
-
-**Storage**:
-- logo stores the public URL to the company logo in storage.
+* Allows expanding beyond edtech later.
 
 ---
 
-### 8. `company_settings`
+### 2.2 `certificate_categories`
 
-**Purpose**: Per-company branding and messaging settings.
+Columns:
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `email_delivery_enabled` (BOOLEAN, DEFAULT true)
-- `whatsapp_delivery_enabled` (BOOLEAN)
-- `api_access_enabled` (BOOLEAN)
-- `email_from_name` (TEXT)
-- `email_from_address` (TEXT)
-- `email_reply_to` (TEXT)
-- `whatsapp_business_account_id` (TEXT) - Meta Business Account ID
-- `whatsapp_phone_number_id` (TEXT) - Meta Phone Number ID (used in API calls)
-- `whatsapp_access_token` (TEXT) - Meta access token (encrypted, long-lived)
-- `logo_url` (TEXT) - URL
-- `primary_color` (TEXT, DEFAULT #ff5400)
-- `max_certificates_per_batch` (INTEGER, DEFAULT 50)
-- `max_import_rows` (INTEGER, DEFAULT 10000)
-- `branding` (JSONB) - JSON object/array
-- `limits` (JSONB) - JSON object/array
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
+* `id`
+* `industry_id` (FK)
+* `key` (unique per industry)
+* `name`
+* `created_at`
 
-**Relationships**:
-- `company_id` → `companies.id`
+Purpose:
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
-
-**Usage**:
-- Branding + comms configuration
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Certificate “type” grouping (course_completion/training/internship/etc).
 
 ---
 
-### 9. `email_messages`
+### 2.3 `certificate_subcategories`
 
-**Purpose**: Outbound email send log and delivery status.
+Columns:
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `certificate_id` (UUID, FOREIGN KEY → certificates.id) - Reference ID
-- `email_template_id` (UUID, FOREIGN KEY → email_templates.id) - Reference ID
-- `recipient_email` (TEXT, NOT NULL)
-- `subject_snapshot` (TEXT, NOT NULL) - Frozen email subject at send time
-- `body_snapshot` (TEXT, NOT NULL) - Frozen email body at send time (for audit/legal)
-- `provider` (TEXT)
-- `provider_message_id` (TEXT) - Reference ID
-- `status` (TEXT, NOT NULL, DEFAULT queued) - Status value
-- `failure_reason` (TEXT)
-- `sent_at` (TIMESTAMPTZ) - Timestamp
-- `delivered_at` (TIMESTAMPTZ) - Timestamp
-- `opened_at` (TIMESTAMPTZ) - Timestamp
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
+* `id`
+* `category_id` (FK)
+* `key` (unique per category)
+* `name`
+* `created_at`
 
-**Relationships**:
-- `company_id` → `companies.id`
-- `certificate_id` → `certificates.id`
-- `email_template_id` → `email_templates.id`
+Purpose:
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
-
-**Usage**:
-- Email delivery tracking
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Course/domain grouping inside categories (web_dev, data_science, etc).
+* Used for filtering templates, imports, certificates, analytics.
 
 ---
 
-### 10. `email_templates`
+## 3) Files and Storage mapping
 
-**Purpose**: Email template library.
+### 3.1 `files`
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id) - Reference ID
-- `name` (TEXT, NOT NULL)
-- `subject` (TEXT, NOT NULL)
-- `body` (TEXT, NOT NULL)
-- `variables` (JSONB) - JSON object/array
-- `is_system` (BOOLEAN)
-- `active` (BOOLEAN, DEFAULT true)
-- `version` (INTEGER, DEFAULT 1)
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
+Central registry for **every uploaded/generated file** stored in Supabase Storage.
 
-**Relationships**:
-- `company_id` → `companies.id`
+Typical columns:
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+* `id`: file record id.
+* `organization_id`: tenant scope.
+* `kind` (file_kind enum): what the file represents (template_source, template_preview, import_original, certificate_pdf, invoice_pdf, etc).
+* `bucket`: should be `authentix` for new storage.
+* `path`: object path in bucket (e.g. `certificate_templates/<org_id>/<template_id>/v0001/source.pdf`).
+* `mime_type`: stored for safety / correct downloads.
+* `size_bytes`: optional, used for validation/monitoring.
+* `checksum` / `hash` if present: tamper detection/dedup.
+* `original_name`: original filename (sanitized).
+* `created_by`: user id that uploaded/created it (if present).
+* `created_at`
 
-**Usage**:
-- Reusable email content
+Purpose:
 
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* One place to attach storage objects to business entities safely.
+* Enables audit, cleanup, and signed URL serving.
 
 ---
 
-### 11. `import_data_rows`
+### 3.2 Storage bucket: `authentix`
 
-**Purpose**: Row-level data captured from import jobs.
+Bucket is private and access is controlled by RLS policies on `storage.objects`.
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `import_job_id` (UUID, FOREIGN KEY → import_jobs.id, NOT NULL) - Reference ID
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `row_number` (INTEGER, NOT NULL)
-- `data` (JSONB, NOT NULL) - JSON object/array
-- `is_deleted` (BOOLEAN)
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
-- `deleted_by` (UUID, FOREIGN KEY → users.id)
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
+#### Required path convention enforced by policy
 
-**Relationships**:
-- `import_job_id` → `import_jobs.id`
-- `company_id` → `companies.id`
-- `deleted_by` → `users.id`
+Object name must match:
+`^(org_branding|certificate_templates|file_imports|certificates|exports|deliveries|invoices)/<org_uuid>/...`
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
-
-**Usage**:
-- Bulk data storage for imports
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+That means every stored object is scoped by org UUID.
 
 ---
 
-### 12. `import_jobs`
+## 4) Certificate templates & versioning
 
-**Purpose**: Import job metadata, status, and mapping info.
+### 4.1 `certificate_templates`
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `created_by` (UUID, FOREIGN KEY → users.id)
-- `file_name` (TEXT)
-- `storage_path` (TEXT, NOT NULL) - Supabase Storage object path
-- `status` (TEXT, NOT NULL, DEFAULT pending) - Status value
-- `total_rows` (INTEGER)
-- `success_count` (INTEGER)
-- `failure_count` (INTEGER)
-- `error_message` (TEXT)
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `template_id` (UUID) - Reference ID
-- `file_storage_path` (TEXT) - Legacy storage path
-- `mapping` (JSONB) - JSON object/array
-- `processed_rows` (INTEGER)
-- `succeeded_rows` (INTEGER)
-- `failed_rows` (INTEGER)
-- `errors` (JSONB) - JSON object/array
-- `uploaded_by` (UUID)
-- `started_at` (TIMESTAMPTZ) - Timestamp
-- `completed_at` (TIMESTAMPTZ) - Timestamp
-- `source_type` (TEXT, DEFAULT csv) - Import source: csv, excel, api
-- `data_persisted` (BOOLEAN) - True if rows stored in import_data_rows table
-- `reusable` (BOOLEAN, DEFAULT true)
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
-- `certificate_category_id` (UUID, FOREIGN KEY → certificate_categories.id) - Reference ID
-- `certificate_subcategory_id` (UUID, FOREIGN KEY → certificate_categories.id) - Reference ID
+Represents a template “container” under an org.
 
-**Relationships**:
-- `company_id` → `companies.id`
-- `created_by` → `users.id`
-- `certificate_category_id` → `certificate_categories.id`
-- `certificate_subcategory_id` → `certificate_categories.id`
+Typical columns:
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+* `id`
+* `organization_id`
+* `category_id`, `subcategory_id`: taxonomy binding (critical).
+* `name`: template display name.
+* `status` (template_status enum): draft/active/archived/etc.
+* `current_version_id` or current version number (if present)
+* `created_at`, `updated_at`, `deleted_at`
 
-**Usage**:
-- Import workflow tracking
+Purpose:
 
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
-
-**Storage**:
-- storage_path stores the uploaded import file path.
-- file_storage_path is a legacy/alternate storage path when present.
+* Stable template identity across revisions.
+* Filters and permissions at org/category/subcategory level.
 
 ---
 
-### 13. `invoice_line_items`
+### 4.2 `certificate_template_versions`
 
-**Purpose**: Line items attached to invoices.
+Each update creates a new version record.
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `invoice_id` (UUID, FOREIGN KEY → invoices.id, NOT NULL) - Reference ID
-- `certificate_id` (UUID, FOREIGN KEY → certificates.id) - Reference ID
-- `description` (TEXT, NOT NULL)
-- `quantity` (INTEGER, NOT NULL, DEFAULT 1)
-- `unit_price` (DECIMAL, NOT NULL)
-- `amount` (DECIMAL, NOT NULL)
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
+Typical columns:
 
-**Relationships**:
-- `invoice_id` → `invoices.id`
-- `certificate_id` → `certificates.id`
+* `id`
+* `template_id`
+* `version_number` (incremented by trigger `increment_template_version`)
+* `source_file_id` (FK to `files`): the uploaded PDF/DOCX/PPTX/image.
+* `preview_file_id` (FK to `files`): generated preview image/webp.
+* `metadata` jsonb: template settings at that version (page count, canvas size, etc).
+* `created_at`
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Invoice breakdown
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* You can see history and later support revert/compare.
 
 ---
 
-### 14. `invoices`
+### 4.3 `certificate_template_fields`
 
-**Purpose**: Invoice records and payment status.
+Stores the “design fields” a user placed for a template version.
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `invoice_number` (TEXT, NOT NULL)
-- `period_start` (DATE, NOT NULL)
-- `period_end` (DATE, NOT NULL)
-- `subtotal` (DECIMAL, NOT NULL)
-- `tax_amount` (DECIMAL, NOT NULL)
-- `total_amount` (DECIMAL, NOT NULL)
-- `currency` (TEXT, DEFAULT INR)
-- `status` (TEXT, NOT NULL, DEFAULT pending) - Status value
-- `payment_method` (TEXT)
-- `payment_gateway_id` (TEXT) - Reference ID
-- `payment_gateway_response` (JSONB) - JSON object/array
-- `paid_at` (TIMESTAMPTZ) - Timestamp
-- `due_date` (DATE, NOT NULL)
-- `notes` (TEXT)
-- `pdf_url` (TEXT) - PDF URL
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
-- `gst_rate_snapshot` (DECIMAL) - GST rate (%) snapshot copied from billing_profiles at invoice creation time
-- `razorpay_invoice_id` (TEXT) - Invoice ID returned by Razorpay
-- `razorpay_payment_id` (TEXT) - Successful Razorpay payment ID
-- `razorpay_order_id` (TEXT) - Razorpay order reference
-- `razorpay_payment_link` (TEXT) - Hosted payment link generated by Razorpay
-- `razorpay_status` (TEXT) - Razorpay invoice status (issued, paid, expired, cancelled)
-- `issued_via` (TEXT, DEFAULT razorpay)
-- `company_snapshot` (JSONB, NOT NULL) - Company legal details snapshot at invoice creation time
-- `billing_snapshot` (JSONB, NOT NULL) - Billing profile snapshot (pricing, GST, currency) at invoice creation time
+Typical columns:
 
-**Relationships**:
-- `company_id` → `companies.id`
+* `id`
+* `template_version_id`
+* `field_key`: stable key used in imports and mapping (e.g. `recipient_name`, `course_name`, `custom_1`)
+* `field_type` (template_field_type enum): text/date/qrcode/image/etc.
+* `label`: user-friendly label shown in UI (important for renamed custom fields).
+* `config` jsonb: coordinates, font size, alignment, QR options, etc.
+* `is_required`
+* `created_at`, `updated_at`
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Billing and payment tracking
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
-
-**Storage**:
-- pdf_url stores a generated invoice PDF URL when available.
+* Drives both sample import files and generation pipeline.
+* Versioned so old generated certificates can reference exact settings.
 
 ---
 
-### 15. `razorpay_events`
+## 5) Importing data
 
-**Purpose**: Razorpay webhook event log.
+### 5.1 `file_import_jobs`
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id) - Reference ID
-- `razorpay_event_id` (TEXT, NOT NULL) - Reference ID
-- `event_type` (TEXT, NOT NULL)
-- `payload` (JSONB, NOT NULL) - JSON object/array
-- `signature_verified` (BOOLEAN)
-- `received_at` (TIMESTAMPTZ, DEFAULT now()) - Timestamp
-- `razorpay_entity_id` (TEXT) - Reference ID
-- `razorpay_entity_type` (TEXT)
-- `processed` (BOOLEAN)
-- `amount` (DECIMAL) - Amount from Razorpay event entity
-- `currency` (TEXT)
-- `status` (TEXT) - Status value
-- `payment_method` (TEXT)
-- `fee` (DECIMAL) - Razorpay processing fee snapshot
-- `tax` (DECIMAL) - GST / tax applied by Razorpay
-- `error_code` (TEXT)
-- `error_reason` (TEXT)
+One record per uploaded import file (CSV/XLSX) or manual batch in future.
 
-**Relationships**:
-- `company_id` → `companies.id`
+Typical columns:
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+* `id`
+* `organization_id`
+* `category_id`, `subcategory_id`: ensures import is tied to taxonomy.
+* `template_id` / `template_version_id` (if present): optional but useful to tie import directly.
+* `status` (import_status enum): uploaded/processing/ready/failed/etc.
+* `original_file_id` (FK to `files`): points to uploaded CSV/XLSX.
+* `summary` jsonb: counts, errors.
+* `created_by`
+* `created_at`, `updated_at`
 
-**Usage**:
-- Webhook audit + idempotency
+Purpose:
 
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Tracks lifecycle of “data upload” step.
+* Makes “Imported Data” dashboard possible.
 
 ---
 
-### 16. `razorpay_refunds`
+### 5.2 `file_import_rows`
 
-**Purpose**: Razorpay refund tracking records.
+Stores normalized rows from import for resend/debug/history.
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id) - Reference ID
-- `razorpay_refund_id` (TEXT, NOT NULL) - Reference ID
-- `razorpay_payment_id` (TEXT, NOT NULL) - Reference ID
-- `amount` (DECIMAL, NOT NULL)
-- `currency` (TEXT, NOT NULL)
-- `status` (TEXT, NOT NULL) - Status value
-- `reason` (TEXT)
-- `payload` (JSONB, NOT NULL) - JSON object/array
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
+Typical columns:
 
-**Relationships**:
-- `company_id` → `companies.id`
+* `id`
+* `import_job_id`
+* `row_index`: row number (unique per job).
+* `data` jsonb: normalized key/value pair data.
+* `errors` jsonb: row validation errors if any.
+* `created_at`
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Refund tracking
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Enables resend / re-generate without re-uploading file.
+* Enables previewing top N rows in UI.
 
 ---
 
-### 17. `user_invitations`
+## 6) Certificate generation & certificates
 
-**Purpose**: User invitation workflow records.
+### 6.1 `certificate_generation_jobs`
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `email` (TEXT, NOT NULL) - Email address
-- `role` (TEXT, NOT NULL, DEFAULT member)
-- `invited_by` (UUID, FOREIGN KEY → users.id)
-- `token` (TEXT, NOT NULL, DEFAULT encode(extensions.gen_random_bytes(32), 'hex'::text))
-- `status` (TEXT, NOT NULL, DEFAULT pending) - Status value
-- `expires_at` (TIMESTAMPTZ, NOT NULL, DEFAULT (now() + '7 days'::interval)) - Timestamp
-- `accepted_at` (TIMESTAMPTZ) - Timestamp
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
+Represents a batch generation request.
 
-**Relationships**:
-- `company_id` → `companies.id`
-- `invited_by` → `users.id`
+Typical columns:
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+* `id`
+* `organization_id`
+* `status` (job_status enum): queued/processing/completed/failed.
+* `category_id`, `subcategory_id`: taxonomy for this job.
+* `created_by`
+* `created_at`, `updated_at`
+* `options` jsonb: generation options (zip threshold, include previews, etc).
 
-**Usage**:
-- Team invite flow
+Purpose:
 
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Tracks progress + links all outputs.
 
 ---
 
-### 18. `users`
+### 6.2 `generation_job_templates`
 
-**Purpose**: User profiles linked to Supabase Auth.
+Allows **one job to generate multiple certificate types/templates at once**.
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `email` (TEXT, NOT NULL) - Email address
-- `full_name` (TEXT)
-- `role` (TEXT, NOT NULL, DEFAULT member)
-- `invited_by` (UUID, FOREIGN KEY → users.id)
-- `last_login_at` (TIMESTAMPTZ) - Timestamp
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `status` (TEXT, DEFAULT active) - User status: active (logged in), invited (pending), disabled
-- `last_seen_at` (TIMESTAMPTZ) - Last activity timestamp (updated on each request)
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
+Typical columns:
 
-**Relationships**:
-- `company_id` → `companies.id`
-- `invited_by` → `users.id`
+* `id`
+* `job_id`
+* `template_id`
+* `template_version_id`
+* `category_id`, `subcategory_id` (enforced by triggers like `enforce_job_template_taxonomy`)
+* `created_at`
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Auth profile + tenant linkage
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Supports your requirement: for a single candidate generate **course + training + internship** in one run.
 
 ---
 
-### 19. `verification_logs`
+### 6.3 `generation_job_recipients`
 
-**Purpose**: Verification attempts and results.
+Stores recipients for the job (from import rows or manual entry).
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `certificate_id` (UUID, FOREIGN KEY → certificates.id) - Reference ID
-- `verifier_ip` (TEXT)
-- `verifier_user_agent` (TEXT)
-- `verifier_location` (TEXT)
-- `result` (TEXT, NOT NULL)
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `ip_address` (INET)
-- `user_agent` (TEXT)
-- `verified_at` (TIMESTAMPTZ, DEFAULT now()) - Timestamp
+Typical columns:
 
-**Relationships**:
-- `company_id` → `companies.id`
-- `certificate_id` → `certificates.id`
+* `id`
+* `job_id`
+* `recipient_name`
+* `recipient_email` (citext)
+* `recipient_phone`
+* `recipient_data` jsonb: full row data (course, dates, custom fields, etc)
+* `created_at`
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Verification audit trail
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Central recipient list to generate certificates and send messages.
 
 ---
 
-### 20. `whatsapp_messages`
+### 6.4 `certificates`
 
-**Purpose**: Outbound WhatsApp send log and delivery status.
+One row per generated certificate (per recipient per template).
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id, NOT NULL) - Reference ID
-- `certificate_id` (UUID, FOREIGN KEY → certificates.id) - Reference ID
-- `whatsapp_template_id` (UUID, FOREIGN KEY → whatsapp_templates.id) - Reference ID
-- `conversation_type` (TEXT) - Meta conversation category (user_initiated, business_initiated, etc.)
-- `conversation_id` (TEXT) - Reference ID
-- `recipient_phone` (TEXT, NOT NULL)
-- `message_payload` (JSONB, NOT NULL) - Exact JSON payload sent to Meta API (for debugging/replay)
-- `meta_message_id` (TEXT) - Meta-assigned message ID (returned from send API, used in webhooks)
-- `status` (TEXT, NOT NULL, DEFAULT queued) - Status value
-- `failure_reason` (TEXT)
-- `error_code` (TEXT)
-- `pricing_model` (TEXT) - Meta pricing model (conversation-based pricing)
-- `price_category` (TEXT)
-- `billable` (BOOLEAN, DEFAULT true) - Whether this message incurs Meta charges
-- `sent_at` (TIMESTAMPTZ) - Timestamp
-- `delivered_at` (TIMESTAMPTZ) - Timestamp
-- `read_at` (TIMESTAMPTZ) - Timestamp
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `cost_amount` (DECIMAL)
-- `cost_currency` (TEXT)
-- `cost_snapshot` (JSONB) - Meta billing cost snapshot at send time
+Key columns (as in your design):
 
-**Relationships**:
-- `company_id` → `companies.id`
-- `certificate_id` → `certificates.id`
-- `whatsapp_template_id` → `whatsapp_templates.id`
+* `id`
+* `organization_id`
+* `generation_job_id`
+* `template_id`
+* `template_version_id`
+* `category_id`, `subcategory_id`
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Recipient identity:
 
-**Usage**:
-- WhatsApp delivery tracking
+* `recipient_name`
+* `recipient_email`
+* `recipient_phone`
+* `recipient_data` jsonb (extra fields used during render)
 
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+Output files:
 
----
+* `certificate_file_id` (FK files): final PDF
+* `certificate_preview_file_id` (FK files): preview image/webp (optional)
 
-### 21. `whatsapp_templates`
+Numbering & lifecycle:
 
-**Purpose**: WhatsApp template library.
+* `certificate_number`: unique per org
+* `issued_at`
+* `expires_at` (nullable)
+* `status` (certificate_status enum): issued/revoked/expired/etc
+* `revoked_at`
+* `reissued_from_certificate_id`: chain of reissues
 
-**Columns**:
-- `id` (UUID, PRIMARY KEY, NOT NULL, DEFAULT extensions.uuid_generate_v4()) - Primary key
-- `company_id` (UUID, FOREIGN KEY → companies.id) - Reference ID
-- `name` (TEXT, NOT NULL)
-- `meta_template_name` (TEXT, NOT NULL) - Template name registered with Meta (e.g., certificate_delivery_v2)
-- `meta_template_id` (TEXT) - Meta-assigned template ID (returned after approval)
-- `language_code` (TEXT, NOT NULL, DEFAULT en_US)
-- `category` (TEXT, NOT NULL)
-- `status` (TEXT, NOT NULL, DEFAULT pending) - Status value
-- `quality_rating` (TEXT) - Meta quality rating (affects rate limits): GREEN (high), YELLOW (medium), RED (low)
-- `rejection_reason` (TEXT)
-- `body_template` (TEXT, NOT NULL)
-- `variables` (JSONB) - JSON object/array
-- `is_system` (BOOLEAN)
-- `last_synced_at` (TIMESTAMPTZ) - Timestamp
-- `created_at` (TIMESTAMPTZ, DEFAULT now()) - Creation time
-- `updated_at` (TIMESTAMPTZ, DEFAULT now()) - Last update time
-- `deleted_at` (TIMESTAMPTZ) - Soft delete timestamp
+Verification:
 
-**Relationships**:
-- `company_id` → `companies.id`
+* `verification_token_hash`: hash of secret token
+* `verification_path`: relative path like `/v/<token>`
+* `qr_payload_url`: absolute URL encoded into QR
 
-**Indexes**:
-- PRIMARY KEY on `id`
-- Other indexes not available via PostgREST (verify in Supabase)
+Purpose:
 
-**Usage**:
-- Reusable WhatsApp templates
-
-**Backend Access**:
-- Accessed via Supabase repositories/services (see src/domains).
+* Single authoritative record for validity, storage, verification, status, and history.
 
 ---
 
-## Table Relationships Diagram
-
-```
-certificate_categories (1) ──< (many) certificate_templates
-certificate_categories (1) ──< (many) import_jobs
-certificate_templates (1) ──< (many) certificates
-certificates (1) ──< (many) certificate_events
-certificates (1) ──< (many) email_messages
-certificates (1) ──< (many) invoice_line_items
-certificates (1) ──< (many) verification_logs
-certificates (1) ──< (many) whatsapp_messages
-companies (1) ──< (many) audit_logs
-companies (1) ──< (many) billing_profiles
-companies (1) ──< (many) certificate_categories
-companies (1) ──< (many) certificate_events
-companies (1) ──< (many) certificate_templates
-companies (1) ──< (many) certificates
-companies (1) ──< (many) company_settings
-companies (1) ──< (many) email_messages
-companies (1) ──< (many) email_templates
-companies (1) ──< (many) import_data_rows
-companies (1) ──< (many) import_jobs
-companies (1) ──< (many) invoices
-companies (1) ──< (many) razorpay_events
-companies (1) ──< (many) razorpay_refunds
-companies (1) ──< (many) user_invitations
-companies (1) ──< (many) users
-companies (1) ──< (many) verification_logs
-companies (1) ──< (many) whatsapp_messages
-companies (1) ──< (many) whatsapp_templates
-email_templates (1) ──< (many) email_messages
-import_jobs (1) ──< (many) import_data_rows
-invoices (1) ──< (many) certificates
-invoices (1) ──< (many) invoice_line_items
-users (1) ──< (many) audit_logs
-users (1) ──< (many) certificate_events
-users (1) ──< (many) certificate_templates
-users (1) ──< (many) certificates
-users (1) ──< (many) import_data_rows
-users (1) ──< (many) import_jobs
-users (1) ──< (many) user_invitations
-users (1) ──< (many) users
-whatsapp_templates (1) ──< (many) whatsapp_messages
-```
-
-## Multi-Tenant Isolation
-
-### Strategy
-
-All tables use `company_id` for tenant isolation:
-- **Backend enforces**: All queries filter by `company_id`
-- **Row-Level Security**: Managed in Supabase (verify policies in dashboard)
-- **Service Role**: Backend uses service role client (bypasses RLS)
-
-### Isolation Pattern
-
-Every repository method:
-1. Accepts `companyId` parameter
-2. Filters queries by `company_id = companyId`
-3. Validates ownership before updates/deletes
-
-Example:
-```typescript
-// TemplateRepository
-async findById(id: string, companyId: string) {
-  return this.supabase
-    .from('certificate_templates')
-NaN
-    .eq('id', id)
-    .eq('company_id', companyId);
-}
-```
-
-## Soft Deletes
-
-### Tables with Soft Delete
-
-- `certificate_categories`
-- `certificate_templates`
-- `certificates`
-- `companies`
-- `email_templates`
-- `import_data_rows`
-- `import_jobs`
-- `invoices`
-- `user_invitations`
-- `users`
-- `whatsapp_templates`
-
-### Pattern
-
-```sql
-WHERE deleted_at IS NULL
-```
-
-## Indexes Strategy
-
-- Primary keys are indexed by default.
-- Additional indexes are not exposed via PostgREST; verify via Supabase SQL editor.
-
-## Data Types
+### 6.5 `certificate_verification_events`
 
-### UUID
-- Used for all primary keys and foreign keys
-- Generated by Supabase (`uuid_generate_v4()`)
+Stores scans/verify actions for analytics and security.
 
-### TEXT
-- Used for strings (names, emails, URLs, etc.)
-- No length limits (PostgreSQL TEXT type)
+Typical columns:
 
-### JSONB
-- Used for flexible data structures (fields, payloads, metadata)
+* `id`
+* `organization_id`
+* `certificate_id`
+* `scanned_at`
+* `ip_address` / `user_agent` (if present)
+* `result` / status snapshot (verified/invalid/revoked)
+* `metadata` jsonb
 
-### DECIMAL
-- Used for monetary values (prices, amounts)
+Purpose:
 
-### BOOLEAN
-- Used for flags (revoked, processed, api_enabled, etc.)
+* “Verification logs” dashboard section.
+* Helps detect abuse or suspicious scanning.
 
-### TIMESTAMPTZ
-- Used for all date/time fields (timezone-aware)
-- Default: `now()`
+---
 
-## Storage Details
+## 7) Deliveries (Email + WhatsApp) tracking
 
-### Supabase Storage Bucket: `minecertificate`
+### 7.1 `delivery_integrations`
 
-**Configuration**:
-- **Bucket Public:** Yes
-- **File Size Limit:** 50 MB
-- **Allowed MIME Types:** `image/png`, `image/jpeg`, `image/webp`, `image/svg+xml`, `application/pdf`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `text/csv`, `text/html`, `text/css`, `application/javascript`, `font/ttf`, `font/woff`, `font/woff2`, `application/zip`
+Per-organization provider configuration (NON-secret parts).
 
-**Path Patterns (observed + code usage)**:
-- Templates: `templates/<company_id>/<timestamp>-<random>.<ext>`
-- Imports: `imports/<company_id>/<timestamp>-<random>.<ext>`
-- Company logos: `company-logos/<company_id>/logo_<timestamp>.<ext>`
-- Bulk downloads: `bulk-downloads/<company_id>/<timestamp>-certificates.zip>`
+Typical columns:
 
-**URL Generation**:
-- **Public URLs**: `supabase.storage.from("minecertificate").getPublicUrl(path)`
-- **Signed URLs**: `supabase.storage.from("minecertificate").createSignedUrl(path, expirySeconds)`
+* `id`
+* `organization_id`
+* `channel` (delivery_channel enum): email/whatsapp
+* `provider`: string key like `meta_cloud`, `smtp`, `sendgrid`
+* `display_name`
+* `is_active`
+* `is_default` (unique per org+channel)
+* Email identity: `from_email`, `from_name`
+* WhatsApp identity: `whatsapp_phone_number`, `whatsapp_phone_number_id`, `whatsapp_waba_id`
+* `config` jsonb: non-secret settings
+* timestamps including `deleted_at`
 
-## Functions & Triggers
+Purpose:
 
-### Database Functions
+* Lets org configure which WhatsApp/email provider to use.
+* Safe to read in UI (no secrets).
 
-- `event_trigger_fn`
-- `generate_api_key`
-- `get_user_company_id`
-- `get_user_role`
-- `verify_api_key`
-- `verify_certificate`
+---
 
-### Triggers
+### 7.2 `delivery_integration_secrets`
 
-- Trigger inventory is not available via PostgREST. Verify via SQL.
+Secret references for integrations (tokens/passwords) using Vault.
 
-## Migration Strategy
+Typical columns:
 
-### Supabase Migrations
+* `integration_id`
+* `secret_type` (delivery_secret_type enum): whatsapp_access_token, smtp_password, etc.
+* `vault_secret_id`: UUID of secret stored in Vault
+* `created_at`
 
-Migrations are managed through Supabase:
-- SQL migration files (if using Supabase CLI)
-- Supabase Dashboard (if using UI)
+Purpose:
 
-### Schema Changes
+* Keeps secrets encrypted and out of public tables.
+* Typically accessed only by backend service role.
 
-1. Create migration file
-2. Test in development
-3. Apply to production
-4. Update backend types if needed
+---
 
-## Backup & Recovery
+### 7.3 `delivery_templates`
 
-### Supabase Backups
+WhatsApp and Email message templates selectable in UI.
 
-- **Automatic Backups**: Supabase handles daily backups
-- **Point-in-Time Recovery**: Available (if enabled)
-- **Manual Backups**: Via Supabase Dashboard
+Typical columns:
 
-### Data Retention
+* `id`
+* `organization_id`
+* `channel` (email/whatsapp)
+* `name`
+* `is_active`
+* `is_default` (unique per org+channel)
+* WhatsApp mapping: `whatsapp_template_name`, `whatsapp_language`
+* Email: `email_subject`
+* `body`: content with variables (e.g. `{{recipient_name}}`)
+* `variables` jsonb: declared variable list for validation/preview
+* `created_at`, `updated_at`
 
-- **Soft Deletes**: Retained indefinitely (for audit)
-- **Hard Deletes**: Manual process (if needed)
+Purpose:
 
-## Performance Considerations
+* Allows “choose template + preview + send”.
 
-### Query Optimization
+---
 
-1. **Indexes**: Verify and add indexes for common filters
-2. **Pagination**: All list endpoints should use pagination
-3. **Selective Fields**: Only select required columns
-4. **JSONB Queries**: Use JSONB operators for efficient queries
+### 7.4 `delivery_messages`
 
-### Connection Pooling
+One message per recipient per channel per job (NOT per certificate).
 
-- Supabase handles connection pooling
-- Backend uses a service role client (reused)
+Typical columns:
 
-### Caching
+* `id`
+* `organization_id`
+* `generation_job_id`
+* `recipient_id` (FK to generation_job_recipients or equivalent)
+* `channel`
+* `status` (delivery_status enum): queued/sent/delivered/read/failed
+* `to_email`, `to_phone`
+* `provider`, `provider_message_id`
+* Timestamps: `queued_at`, `sent_at`, `delivered_at`, `read_at`, `failed_at`
+* `error` / `failure_reason` (if present)
+* `created_at`
 
-- No application-level caching
-- Consider Redis for future optimization
+Purpose:
 
-## Security
+* UI “WhatsApp Messages” and “Email Messages” history page.
+* Supports status tracking from provider webhooks.
 
-### Row-Level Security (RLS)
+---
 
-- Policies are managed in Supabase; verify via SQL and dashboard.
-- Backend uses service role for server-side access.
+### 7.5 `delivery_message_items`
 
-### Data Encryption
+Links a `delivery_message` to **multiple certificates/files**, enabling:
 
-- **At Rest**: Supabase encrypts database
-- **In Transit**: TLS/SSL for all connections
-- **API Keys**: Store only hashes in database
+> send 2–4 certificates to the same recipient in ONE WhatsApp/email.
 
-### Access Control
+Typical columns:
 
-- **JWT Verification**: All protected endpoints verify JWT
-- **Company Isolation**: All queries filter by company_id
-- **API Keys**: Alternative authentication for programmatic access
+* `id`
+* `message_id` (FK delivery_messages)
+* `certificate_id` (FK certificates) — optional if attachment is not a certificate
+* `file_id` (FK files) — for attachments
+* Unique constraint `(message_id, certificate_id)` prevents duplicates
+* `created_at`
 
-## Monitoring
+Purpose:
 
-### Query Performance
+* Supports “send all certificates at once” requirement.
 
-- Supabase Dashboard provides query analytics
-- Monitor slow queries and index usage
+---
 
-### Storage Usage
+### 7.6 `delivery_provider_webhook_events`
 
-- Monitor Supabase Storage usage
-- Clean up old files (if needed)
-- Implement retention policies (if needed)
+Stores raw webhook events from providers (minimal audit/debug, not “over logging”).
 
-## How to Verify Actual Database Schema
+Typical columns:
 
-This documentation is generated from the live Supabase schema, but indexes, policies, and triggers are not included. To verify full details:
+* `id`
+* `organization_id` (nullable if unknown)
+* `channel`
+* `provider`
+* `provider_message_id`
+* `event_type` (sent/delivered/read/failed)
+* `payload` jsonb
+* `received_at`
 
-### Method 1: Supabase Dashboard
-1. Go to Supabase Dashboard
-2. Navigate to **Database > Tables**
-3. Click on any table to see:
-   - All columns with data types
-   - Constraints (primary keys, foreign keys, unique)
-   - Indexes
-   - Default values
-   - Nullable status
+Purpose:
 
-### Method 2: SQL Queries
+* Proof and debugging when a user says “I didn’t get it”.
+* Lets you reconcile statuses without spamming application logs.
 
-Run these queries in Supabase SQL Editor:
+---
 
-**Get all columns for a table:**
-```sql
-SELECT
-  column_name,
-  data_type,
-  is_nullable,
-  column_default
-FROM information_schema.columns
-WHERE table_schema = 'public'
-  AND table_name = 'certificates'
-ORDER BY ordinal_position;
-```
+## 8) Billing (Pay-as-you-go + subscription + trial)
 
-**Get all indexes:**
-```sql
-SELECT
-  indexname,
-  tablename,
-  indexdef
-FROM pg_indexes
-WHERE schemaname = 'public'
-  AND tablename = 'certificates';
-```
+This schema supports:
 
-**Get all foreign keys:**
-```sql
-SELECT
-  tc.table_name,
-  kcu.column_name,
-  ccu.table_name AS foreign_table_name,
-  ccu.column_name AS foreign_column_name
-FROM information_schema.table_constraints AS tc
-JOIN information_schema.key_column_usage AS kcu
-  ON tc.constraint_name = kcu.constraint_name
-JOIN information_schema.constraint_column_usage AS ccu
-  ON ccu.constraint_name = tc.constraint_name
-WHERE tc.constraint_type = 'FOREIGN KEY'
-  AND tc.table_schema = 'public';
-```
+* Monthly platform subscription (default 399 INR + GST)
+* Per-certificate fee (default 10 INR + GST, only when certificate is generated)
+* Org-specific pricing overrides
+* Trial: 7 days + 10 free certificates (and customizable per org later)
+* Razorpay-based payments + provider event tracking
+* Invoice numbering: `XEN-<org_slug>-NNNNNN`
 
-### Method 3: Supabase CLI
+### 8.1 `billing_price_books`
 
-If you have Supabase CLI installed:
-```bash
-supabase db dump --schema public > schema.sql
-```
+Defines named pricing plans (even if you have only one right now).
 
-## Future Enhancements
+Typical columns:
 
-- **Schema Sync**: Automate schema documentation from actual database
-- **Archiving**: Archive old certificates/imports
-- **Full-Text Search**: Add search indexes for names/descriptions
-- **Read Replicas**: For read-heavy workloads
+* `id`
+* `key` (e.g. `startup`)
+* currency fields and base pricing values
+* `created_at`
+
+Purpose:
+
+* Central default pricing that applies to all orgs unless overridden.
+
+---
+
+### 8.2 `organization_pricing_overrides`
+
+Allows you (admin) to override pricing per org.
+
+Typical columns:
+
+* `id`
+* `organization_id`
+* effective dates (`effective_from`, `effective_to`)
+* override values:
+
+  * platform fee waived or custom
+  * per certificate fee custom
+  * gst rate override if needed
+* `created_at`
+
+Purpose:
+
+* “Special deal per customer” support without code hacks.
+
+---
+
+### 8.3 `billing_periods`
+
+One row per org per month billing period.
+
+Typical columns:
+
+* `id`
+* `organization_id`
+* `period_start` (date)
+* `period_end` (date)
+* `status` (billing_period_status enum): open/closed/invoiced/paid etc
+* timestamps
+
+Purpose:
+
+* Normalizes monthly billing timeline and invoice grouping.
+
+---
+
+### 8.4 `billing_usage_events`
+
+Usage signals (e.g., certificate generated) recorded as events.
+
+Typical columns:
+
+* `id`
+* `organization_id`
+* `period_id`
+* event type (e.g. certificate_generated)
+* `certificate_id` (nullable FK)
+* `occurred_at`
+* `quantity`
+* metadata jsonb
+
+Purpose:
+
+* Drives per-certificate billing and auditability.
+
+---
+
+### 8.5 `billing_invoices` & `billing_invoice_items`
+
+Invoice header and detailed line items.
+
+`billing_invoices` typical columns:
+
+* `id`
+* `organization_id`
+* `period_id` (nullable)
+* `invoice_number` (unique) using format `XEN-<org_slug>-000001`
+* `issue_date`
+* `status` (billing_invoice_status enum)
+* totals: subtotal, gst, total, paid amount, due amount
+* `created_at`
+
+`billing_invoice_items` typical columns:
+
+* `id`
+* `invoice_id`
+* `line_item_type` (billing_line_item_type): subscription, per_certificate, credit, debit
+* description
+* quantity, unit price, amount
+* `created_at`
+
+Purpose:
+
+* Produces invoice PDF + UI billing history.
+
+---
+
+### 8.6 `billing_orders`, `billing_payments`, `billing_refunds`
+
+Provider payment lifecycle records (Razorpay).
+
+`billing_orders`:
+
+* org_id
+* provider order id (`razorpay_order_id`)
+* amount, currency
+* status (billing_order_status)
+* created_at
+
+`billing_payments`:
+
+* org_id
+* provider payment id (`razorpay_payment_id`)
+* amount, currency
+* status (billing_payment_status)
+* created_at
+
+`billing_refunds`:
+
+* org_id
+* provider refund id (`razorpay_refund_id`)
+* amount, status (billing_refund_status)
+* created_at
+
+Purpose:
+
+* Payment reconciliation and proof.
+
+---
+
+### 8.7 `billing_provider_events`
+
+Raw provider events (webhooks) to ensure idempotency + traceability.
+
+Typical columns:
+
+* `id`
+* `organization_id`
+* provider enum (billing_provider)
+* `payload_hash` (unique) prevents double-processing
+* payload jsonb
+* status (provider_event_status)
+* `received_at`
+
+Purpose:
+
+* Robust webhook ingestion and audit.
+
+---
+
+### 8.8 `billing_credits_debits`
+
+Manual adjustments (credits/debits) applied to accounts.
+
+Typical columns:
+
+* `id`
+* `organization_id`
+* amount
+* reason
+* created_at
+
+Purpose:
+
+* Admin-driven billing corrections.
+
+---
+
+## 9) Analytics cache
+
+### `dashboard_stats_cache`
+
+A cached snapshot of dashboard stats to avoid heavy queries.
+
+Typical columns:
+
+* `organization_id` (PK)
+* computed stats jsonb
+* `computed_at`
+
+Purpose:
+
+* Makes dashboard “instant” without expensive aggregation every page load.
+
+---
+
+## 10) Security audit logging
+
+### `app_audit_logs`
+
+Lightweight, “required only” audit log table (not noisy).
+
+Typical columns:
+
+* `id`
+* `organization_id`
+* `actor_user_id`: who performed action
+* `action`: e.g. `template.uploaded`, `billing.invoice_created`
+* `entity_type`: table/entity category (template, certificate, invoice, etc)
+* `entity_id`: uuid of target entity
+* `severity`: info/warn/high
+* `metadata` jsonb: minimal useful context (no secrets/PII)
+* `created_at`
+
+Purpose:
+
+* Security and compliance tracking without application log spam.
+
+---
+
+## 11) Key public functions and what they are used for
+
+* `current_user_id()`
+  Returns the current authenticated user id (auth.uid wrapper used by policies).
+
+* `get_user_role()`
+  Returns role key for current user (used in RLS policies and authorization checks).
+
+* `is_member_of_org(org_id)`
+  Returns true if current user is an active member of that org. Used heavily in RLS and storage policies.
+
+* `verify_api_key(provided_key)`
+  Validates API key and returns org id (service-to-service auth support).
+
+* `next_certificate_number(p_organization_id)`
+  Generates next certificate number using org prefix/format rules.
+
+* `next_invoice_number(p_org_id)`
+  Generates invoice number in your chosen format: `XEN-<org_slug>-NNNNNN`.
+
+* `verify_certificate(token)`
+  Given verification token, returns certificate verification payload for public verification page.
+
+* `mark_expired_certificates()`
+  Maintenance function that marks expired certs as expired/revoked status as per your lifecycle.
+
+* `revoke_certificate(p_certificate_id, p_revoked_by, p_reason)`
+  Marks a certificate as revoked while preserving record for audit/history.
+
+* Billing functions:
+
+  * `get_org_effective_pricing(p_org_id, p_at)` → resolves default + overrides
+  * `ensure_billing_period(...)`, `ensure_billing_periods_for_month(...)`
+  * `create_invoice_for_period(...)`
+  * `apply_payment_to_invoice(...)`
+  * `recompute_invoice_totals(...)`
+
+* Enforcement triggers:
+
+  * `enforce_import_job_org`, `enforce_import_job_taxonomy`
+    Ensures import jobs always match org/taxonomy constraints.
+  * `enforce_job_template_org`, `enforce_job_template_taxonomy`
+    Ensures templates attached to jobs belong to the org and match category hierarchy.
+  * `validate_certificate_category_hierarchy`
+    Ensures category/subcategory relationships stay correct.
+
+---
+
+## 12) Enums (important behavior switches)
+
+You have enums for:
+
+* Template: `template_status`, `template_field_type`
+* Jobs/imports: `job_status`, `import_status`
+* Membership/invite: `member_status`, `invite_status`
+* Certificates: `certificate_status`
+* Delivery: `delivery_channel`, `delivery_status`, `delivery_secret_type`
+* Billing: invoice/order/payment/refund statuses + provider + line item types
+* File classification: `file_kind`
+* Org billing: `organization_billing_status`
+* Provider events: `provider_event_status`
+
+Purpose:
+
+* Keeps status transitions consistent and queryable.
+
+---
+
+## 13) Storage: folder roots + what each root stores
+
+Bucket: **`authentix`** (private)
+
+Root folders (these must exist as prefixes; you already created them):
+
+1. `org_branding/<org_id>/...`
+
+   * logos: organization logo
+   * stamps: stamp images
+   * signatures: signature assets
+   * optional: brand assets used in certificates/verification pages
+
+2. `certificate_templates/<org_id>/...`
+
+   * template source files (pdf/docx/pptx/images)
+   * preview renders (webp/png)
+   * organized by template_id and version
+
+3. `file_imports/<org_id>/...`
+
+   * original uploaded CSV/XLSX
+   * normalized row exports if you choose to store them (jsonl/csv)
+
+4. `certificates/<org_id>/...`
+
+   * generated certificate outputs (pdf)
+   * optional previews
+
+5. `exports/<org_id>/...`
+
+   * bulk zip exports for generation jobs
+
+6. `deliveries/<org_id>/...`
+
+   * message attachments if you store them separately
+   * delivery artifacts (optional)
+
+7. `invoices/<org_id>/...`
+
+   * generated invoice PDFs named like `XEN-<org_slug>-000001.pdf`
+   * organized by year/month if you want
+
+### Storage access model
+
+* Bucket is private.
+* Access is allowed only when:
+
+  * user is authenticated AND
+  * object path matches allowed roots AND
+  * `is_member_of_org(<org_id extracted from path>)` is true
+
+This prevents cross-tenant access.
+
+---
+
+## 14) What is intentionally NOT stored in public tables
+
+* **Passwords**: handled by Supabase Auth (hashing + reset flows).
+* Raw provider secrets: stored in Vault and referenced by `delivery_integration_secrets`.
+* Raw verification tokens: only hashes are stored (`verification_token_hash`).
+
+---
+
