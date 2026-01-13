@@ -344,10 +344,10 @@ export class AuthService {
         email: authUser.email,
       } as any);
 
-      if (profileInsertError) {
-        console.error(`[Bootstrap] Error creating profile: ${profileInsertError.message}`, profileInsertError);
-        throw new Error(`Failed to create profile: ${profileInsertError.message}`);
-      }
+    if (profileInsertError) {
+      console.error(`[Bootstrap] Error creating profile: ${profileInsertError.message}`, profileInsertError);
+      throw new Error(`[Bootstrap Step: Profile Creation] Failed to create profile: ${profileInsertError.message}`);
+    }
       console.log(`[Bootstrap] Profile created successfully`);
     } else {
       console.log(`[Bootstrap] Profile already exists`);
@@ -382,10 +382,15 @@ export class AuthService {
 
     console.log(`[Bootstrap] Generated unique slug: ${slug}`);
 
-    // Generate unique application_id
-    const { generateApplicationId } = await import('../../lib/utils/ids.js');
+    // Generate unique application_id and API key
+    // Note: API key is generated once and hashed with SHA-256 before storage
+    // The plaintext API key is never stored (only the hash)
+    const { generateApplicationId, generateAPIKey, hashAPIKey } = await import('../../lib/utils/ids.js');
     const applicationId = generateApplicationId();
+    const apiKey = generateAPIKey();
+    const apiKeyHash = await hashAPIKey(apiKey);
     console.log(`[Bootstrap] Generated application_id: ${applicationId}`);
+    console.log(`[Bootstrap] Generated API key (hash stored, plaintext discarded for security)`);
 
     // Create organization with trial
     const trialStart = new Date();
@@ -404,25 +409,46 @@ export class AuthService {
       trial_ends_at: trialEnd.toISOString(),
       trial_free_certificates_limit: 10,
       trial_free_certificates_used: 0,
+      api_key_hash: apiKeyHash,
+      api_key_created_at: trialStart.toISOString(),
+      api_key_last_rotated_at: trialStart.toISOString(),
     };
     
     console.log(`[Bootstrap] Organization insert payload keys:`, Object.keys(orgInsertPayload));
     
+    // Insert organization and select all required fields
+    // Note: If you recently changed the database schema, ensure PostgREST schema cache is refreshed
+    // (Restart services or reload schema in Supabase Dashboard → Settings → API)
     const { data: newOrg, error: orgError } = await supabase
       .from('organizations')
       .insert(orgInsertPayload)
-      .select()
+      .select(`
+        id,
+        name,
+        slug,
+        application_id,
+        email,
+        billing_status,
+        trial_started_at,
+        trial_ends_at,
+        trial_free_certificates_limit,
+        trial_free_certificates_used,
+        api_key_hash,
+        api_key_created_at,
+        api_key_last_rotated_at,
+        created_at
+      `)
       .single();
 
     if (orgError) {
       console.error(`[Bootstrap] Error creating organization: ${orgError.message}`, orgError);
       console.error(`[Bootstrap] Error details:`, JSON.stringify(orgError, null, 2));
-      console.error(`[Bootstrap] Insert payload keys that failed:`, Object.keys(orgInsertPayload));
-      throw new Error(`Failed to create organization: ${orgError.message}`);
+      console.error(`[Bootstrap] Insert payload keys:`, Object.keys(orgInsertPayload));
+      throw new Error(`[Bootstrap Step: Organization Creation] Failed to create organization: ${orgError.message}`);
     }
     if (!newOrg) {
       console.error(`[Bootstrap] Organization insert returned no data`);
-      throw new Error('Failed to create organization: No data returned');
+      throw new Error('[Bootstrap Step: Organization Creation] Failed to create organization: No data returned from insert');
     }
 
     console.log(`[Bootstrap] Organization created successfully: org_id=${(newOrg as any).id}`);
@@ -468,11 +494,11 @@ export class AuthService {
 
     if (ownerRoleError) {
       console.error(`[Bootstrap] Error fetching owner role: ${ownerRoleError.message}`, ownerRoleError);
-      throw new Error(`Failed to find owner role: ${ownerRoleError.message}`);
+      throw new Error(`[Bootstrap Step: Role Lookup] Failed to find owner role: ${ownerRoleError.message}`);
     }
     if (!ownerRole) {
       console.error(`[Bootstrap] Owner role not found after creation`);
-      throw new Error('Failed to find owner role');
+      throw new Error('[Bootstrap Step: Role Lookup] Failed to find owner role after creation');
     }
 
     console.log(`[Bootstrap] Owner role found: role_id=${(ownerRole as any).id}`);
@@ -517,11 +543,11 @@ export class AuthService {
     if (memberError) {
       console.error(`[Bootstrap] Error creating membership: ${memberError.message}`, memberError);
       console.error(`[Bootstrap] Error details:`, JSON.stringify(memberError, null, 2));
-      throw new Error(`Failed to create membership: ${memberError.message}`);
+      throw new Error(`[Bootstrap Step: Membership Creation] Failed to create membership: ${memberError.message}`);
     }
     if (!newMembership) {
       console.error(`[Bootstrap] Membership insert returned no data`);
-      throw new Error('Failed to create membership: No data returned');
+      throw new Error('[Bootstrap Step: Membership Creation] Failed to create membership: No data returned from insert');
     }
 
     console.log(`[Bootstrap] Membership created successfully: membership_id=${(newMembership as any).id}`);

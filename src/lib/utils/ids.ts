@@ -38,6 +38,11 @@ export function generateAPIKey(): string {
 
 /**
  * Hash API key using SHA-256
+ * 
+ * Note: SHA-256 is used for API key hashing (deterministic, fast verification).
+ * Alternative approaches (HMAC-SHA256 with secret or bcrypt) are possible but
+ * SHA-256 is standard for API key storage and provides adequate security.
+ * The plaintext API key is generated once during bootstrap and never stored.
  */
 export async function hashAPIKey(apiKey: string): Promise<string> {
   const { createHash } = await import('node:crypto');

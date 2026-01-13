@@ -223,28 +223,36 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         }
 
         // If no token, check if email is provided for cross-device verification check
+        // This allows frontend polling to check verification status without requiring session cookies
         const email = (request.query as { email?: string })?.email;
         if (email) {
           const { getSupabaseClient } = await import('../../lib/supabase/client.js');
           const supabase = getSupabaseClient();
           
           // Check verification status by email (for cross-device polling)
-          // Use Admin API to find user by email
+          // Uses SERVICE ROLE to query auth.users via Admin API
+          // Does NOT require cookies or Authorization header
           try {
-            // List users and find by email (Admin API doesn't have direct getUserByEmail)
+            // Note: Supabase Admin API doesn't have direct getUserByEmail method
+            // We use listUsers() and filter by email (acceptable for verification checks)
             const { data: { users }, error } = await supabase.auth.admin.listUsers();
             
             if (error) {
-              request.log.error(error, 'Failed to check verification status');
+              request.log.error(error, 'Failed to check verification status by email');
+              // Return success with valid=false (not 500) if user not found or error
               sendSuccess(reply, { user: null, valid: false, email_verified: false });
               return;
             }
 
             const user = users?.find(u => u.email?.toLowerCase() === email.toLowerCase());
             if (!user) {
+              // User not found - return success with valid=false (not 500)
               sendSuccess(reply, { user: null, valid: false, email_verified: false });
               return;
             }
+
+            // Check email_confirmed_at to determine verification status
+            const emailVerified = !!user.email_confirmed_at;
 
             sendSuccess(reply, {
               user: {
@@ -252,12 +260,13 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
                 email: user.email || '',
                 full_name: (user.user_metadata?.full_name as string) || null,
               },
-              valid: !!user.email_confirmed_at,
-              email_verified: !!user.email_confirmed_at,
+              valid: emailVerified,
+              email_verified: emailVerified,
             });
             return;
           } catch (error) {
             request.log.error(error, 'Failed to check verification status by email');
+            // Return success with valid=false (not 500) on error
             sendSuccess(reply, { user: null, valid: false, email_verified: false });
             return;
           }

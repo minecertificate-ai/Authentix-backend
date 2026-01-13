@@ -66,3 +66,26 @@ Enables frontend polling to detect email verification even when verification lin
   - `trial_free_certificates_limit` is set to 10
   - `trial_free_certificates_used` is set to 0
   - Audit logs are created with correct field names
+
+### Fixed - Missing API Key Hash in Bootstrap
+- **Root cause:** `organizations` table requires `api_key_hash` (NOT NULL constraint), but bootstrap was not generating or setting it
+- **Fix:**
+  - Added API key generation during bootstrap using `generateAPIKey()` and `hashAPIKey()`
+  - Added `api_key_hash`, `api_key_created_at`, and `api_key_last_rotated_at` to organization insert payload
+  - Resolves error: "null value in column 'api_key_hash' of relation 'organizations' violates not-null constraint"
+- **Files changed:**
+  - `src/domains/auth/service.ts`: Added API key generation and hash to organization creation
+
+### Fixed - Enhanced Error Messages and Cross-Device Verification
+- **Improved error messages:** Bootstrap errors now include step identifiers (e.g., "[Bootstrap Step: Organization Creation]")
+- **Enhanced `/auth/me?email` endpoint:**
+  - Works without cookies/session (cross-device verification support)
+  - Uses SERVICE ROLE to query auth.users via Admin API
+  - Returns `email_verified: true` when `email_confirmed_at` is set
+  - Returns `valid: false` (not 500) when user not found
+- **Bootstrap return fields:** Explicitly selects all required organization fields (billing_status, trial_*, api_key_*)
+- **PostgREST schema cache note:** Added comment about refreshing schema cache after schema changes
+- **Files changed:**
+  - `src/domains/auth/service.ts`: Enhanced error messages, explicit field selection
+  - `src/api/v1/auth.ts`: Improved `/auth/me?email` endpoint with better error handling
+  - `src/lib/utils/ids.ts`: Added documentation for API key hashing approach
