@@ -238,7 +238,8 @@ export class AuthService {
 
     console.log(`[Bootstrap] Starting bootstrap for user_id: ${userId}`);
 
-    // Check if user already has an active organization
+    // Check if user already has an active organization (idempotency check)
+    console.log(`[Bootstrap Step: Lookup Membership] Checking for existing membership for user_id: ${userId}`);
     const { data: existingMembership, error: membershipCheckError } = await supabase
       .from('organization_members')
       .select(`
@@ -265,7 +266,8 @@ export class AuthService {
       .maybeSingle();
 
     if (membershipCheckError) {
-      console.error(`[Bootstrap] Error checking membership: ${membershipCheckError.message}`, membershipCheckError);
+      console.error(`[Bootstrap Step: Lookup Membership] Error checking membership: ${membershipCheckError.message}`, membershipCheckError);
+      throw new Error(`[Bootstrap Step: Lookup Membership] Failed to check existing membership: ${membershipCheckError.message}`);
     }
 
     if (existingMembership) {
@@ -336,7 +338,7 @@ export class AuthService {
     }
 
     if (!existingProfile) {
-      console.log(`[Bootstrap] Creating profile for user_id: ${userId}`);
+      console.log(`[Bootstrap Step: Profile Creation] Creating profile for user_id: ${userId}`);
       const { error: profileInsertError } = await supabase.from('profiles').insert({
         id: userId,
         first_name: firstName || 'User',
@@ -344,13 +346,13 @@ export class AuthService {
         email: authUser.email,
       } as any);
 
-    if (profileInsertError) {
-      console.error(`[Bootstrap] Error creating profile: ${profileInsertError.message}`, profileInsertError);
-      throw new Error(`[Bootstrap Step: Profile Creation] Failed to create profile: ${profileInsertError.message}`);
-    }
-      console.log(`[Bootstrap] Profile created successfully`);
+      if (profileInsertError) {
+        console.error(`[Bootstrap Step: Profile Creation] Error creating profile: ${profileInsertError.message}`, profileInsertError);
+        throw new Error(`[Bootstrap Step: Profile Creation] Failed to create profile: ${profileInsertError.message}`);
+      }
+      console.log(`[Bootstrap Step: Profile Creation] Profile created successfully`);
     } else {
-      console.log(`[Bootstrap] Profile already exists`);
+      console.log(`[Bootstrap Step: Profile Creation] Profile already exists, skipping creation`);
     }
 
     // Generate unique slug for organization
@@ -393,32 +395,41 @@ export class AuthService {
     console.log(`[Bootstrap] Generated API key (hash stored, plaintext discarded for security)`);
 
     // Create organization with trial
+    // Note: trial_started_at has default now(), but we set it explicitly for clarity
     const trialStart = new Date();
     const trialEnd = new Date(trialStart.getTime() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-    console.log(`[Bootstrap] Creating organization: name="${companyName}", slug="${slug}"`);
+    console.log(`[Bootstrap Step: Organization Creation] Creating organization: name="${companyName}", slug="${slug}"`);
     
-    // Build insert payload with only existing columns
+    // Build insert payload with ONLY existing columns
+    // Required: name, slug, application_id, api_key_hash (NOT NULL)
+    // Optional: email, billing_status, trial_* fields
+    // DO NOT include: api_key_created_at, api_key_last_rotated_at (columns don't exist)
+    // DO NOT include: trial_start, trial_end, free_certificates_included (old column names)
     const orgInsertPayload = {
       name: companyName,
       slug,
       application_id: applicationId,
       email: authUser.email,
       billing_status: 'trialing',
-      trial_started_at: trialStart.toISOString(),
-      trial_ends_at: trialEnd.toISOString(),
-      trial_free_certificates_limit: 10,
-      trial_free_certificates_used: 0,
-      api_key_hash: apiKeyHash,
-      api_key_created_at: trialStart.toISOString(),
-      api_key_last_rotated_at: trialStart.toISOString(),
+      trial_started_at: trialStart.toISOString(), // Explicitly set (default would be now())
+      trial_ends_at: trialEnd.toISOString(), // 7 days from now
+      trial_free_certificates_limit: 10, // Explicitly set (default would be 10)
+      trial_free_certificates_used: 0, // Explicitly set (default would be 0)
+      api_key_hash: apiKeyHash, // REQUIRED: NOT NULL, must be set
     };
     
-    console.log(`[Bootstrap] Organization insert payload keys:`, Object.keys(orgInsertPayload));
+    // Validate api_key_hash is not null/undefined
+    if (!apiKeyHash || typeof apiKeyHash !== 'string') {
+      throw new Error('[Bootstrap Step: Organization Creation] api_key_hash is required but was null/undefined');
+    }
+    
+    console.log(`[Bootstrap Step: Organization Creation] Insert payload keys:`, Object.keys(orgInsertPayload));
     
     // Insert organization and select all required fields
     // Note: If you recently changed the database schema, ensure PostgREST schema cache is refreshed
-    // (Restart services or reload schema in Supabase Dashboard → Settings → API)
+    // Run in Supabase SQL editor: NOTIFY pgrst, 'reload schema';
+    // Or restart services to refresh schema cache
     const { data: newOrg, error: orgError } = await supabase
       .from('organizations')
       .insert(orgInsertPayload)
@@ -434,8 +445,6 @@ export class AuthService {
         trial_free_certificates_limit,
         trial_free_certificates_used,
         api_key_hash,
-        api_key_created_at,
-        api_key_last_rotated_at,
         created_at
       `)
       .single();
@@ -454,7 +463,7 @@ export class AuthService {
     console.log(`[Bootstrap] Organization created successfully: org_id=${(newOrg as any).id}`);
 
     // Ensure system roles exist for this organization
-    console.log(`[Bootstrap] Creating system roles for org_id: ${(newOrg as any).id}`);
+    console.log(`[Bootstrap Step: Roles Seed] Creating system roles for org_id: ${(newOrg as any).id}`);
     const systemRoles = ['owner', 'admin', 'member'];
     for (const roleKey of systemRoles) {
       const { data: existingRole, error: roleCheckError } = await supabase
@@ -465,7 +474,8 @@ export class AuthService {
         .maybeSingle();
 
       if (roleCheckError && roleCheckError.code !== 'PGRST116') {
-        console.error(`[Bootstrap] Error checking role ${roleKey}: ${roleCheckError.message}`, roleCheckError);
+        console.error(`[Bootstrap Step: Roles Seed] Error checking role ${roleKey}: ${roleCheckError.message}`, roleCheckError);
+        throw new Error(`[Bootstrap Step: Roles Seed] Failed to check existing role ${roleKey}: ${roleCheckError.message}`);
       }
 
       if (!existingRole) {
@@ -477,10 +487,13 @@ export class AuthService {
         } as any);
 
         if (roleInsertError) {
-          console.error(`[Bootstrap] Error creating role ${roleKey}: ${roleInsertError.message}`, roleInsertError);
+          console.error(`[Bootstrap Step: Roles Seed] Error creating role ${roleKey}: ${roleInsertError.message}`, roleInsertError);
+          throw new Error(`[Bootstrap Step: Roles Seed] Failed to create role ${roleKey}: ${roleInsertError.message}`);
         } else {
-          console.log(`[Bootstrap] Created role: ${roleKey}`);
+          console.log(`[Bootstrap Step: Roles Seed] Created role: ${roleKey}`);
         }
+      } else {
+        console.log(`[Bootstrap Step: Roles Seed] Role ${roleKey} already exists, skipping creation`);
       }
     }
 
@@ -553,7 +566,7 @@ export class AuthService {
     console.log(`[Bootstrap] Membership created successfully: membership_id=${(newMembership as any).id}`);
 
     // Write audit logs
-    console.log(`[Bootstrap] Writing audit logs`);
+    console.log(`[Bootstrap Step: Audit Logs] Writing audit logs`);
     const { error: auditError } = await supabase.from('app_audit_logs').insert([
       {
         organization_id: (newOrg as any).id,
@@ -574,9 +587,10 @@ export class AuthService {
     ] as any);
 
     if (auditError) {
-      console.warn(`[Bootstrap] Error writing audit logs (non-fatal): ${auditError.message}`, auditError);
+      console.warn(`[Bootstrap Step: Audit Logs] Error writing audit logs (non-fatal): ${auditError.message}`, auditError);
+      // Audit logs are non-fatal, so we don't throw here
     } else {
-      console.log(`[Bootstrap] Audit logs written successfully`);
+      console.log(`[Bootstrap Step: Audit Logs] Audit logs written successfully`);
     }
 
     // Get profile

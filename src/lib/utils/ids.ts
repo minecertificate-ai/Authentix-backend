@@ -43,10 +43,21 @@ export function generateAPIKey(): string {
  * Alternative approaches (HMAC-SHA256 with secret or bcrypt) are possible but
  * SHA-256 is standard for API key storage and provides adequate security.
  * The plaintext API key is generated once during bootstrap and never stored.
+ * 
+ * @param apiKey - Plaintext API key to hash
+ * @returns SHA-256 hash as hex string (never null/undefined)
+ * @throws Error if apiKey is null/undefined/empty
  */
 export async function hashAPIKey(apiKey: string): Promise<string> {
+  if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length === 0) {
+    throw new Error('hashAPIKey: apiKey must be a non-empty string');
+  }
   const { createHash } = await import('node:crypto');
-  return createHash('sha256').update(apiKey).digest('hex');
+  const hash = createHash('sha256').update(apiKey).digest('hex');
+  if (!hash || hash.length === 0) {
+    throw new Error('hashAPIKey: Failed to generate hash');
+  }
+  return hash;
 }
 
 /**

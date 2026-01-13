@@ -89,3 +89,17 @@ Enables frontend polling to detect email verification even when verification lin
   - `src/domains/auth/service.ts`: Enhanced error messages, explicit field selection
   - `src/api/v1/auth.ts`: Improved `/auth/me?email` endpoint with better error handling
   - `src/lib/utils/ids.ts`: Added documentation for API key hashing approach
+
+### Fixed - Removed Non-Existent Columns from Bootstrap
+- **Root cause:** Bootstrap was trying to insert `api_key_created_at` and `api_key_last_rotated_at` which don't exist in `organizations` table
+- **Fix:**
+  - Removed `api_key_created_at` and `api_key_last_rotated_at` from organization insert payload
+  - Removed these fields from `.select()` statement
+  - Added validation to ensure `api_key_hash` is never null/undefined before insert
+  - Enhanced `hashAPIKey()` function to validate input and throw errors if hash generation fails
+- **New endpoint:** `GET /api/v1/auth/verification-status?email={email}` - Returns `{ verified: boolean }` for frontend polling
+- **Enhanced error responses:** Bootstrap errors now include `step` field extracted from error message
+- **Files changed:**
+  - `src/domains/auth/service.ts`: Removed non-existent columns, added validation, enhanced error messages
+  - `src/api/v1/auth.ts`: Added verification-status endpoint, enhanced error response structure
+  - `src/lib/utils/ids.ts`: Added validation to `hashAPIKey()` to ensure it never returns null

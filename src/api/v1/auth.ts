@@ -282,6 +282,58 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
   );
 
   /**
+   * GET /api/v1/auth/verification-status?email={email}
+   * Check email verification status (for frontend polling, no session required)
+   * Returns { verified: boolean }
+   */
+  app.get(
+    '/auth/verification-status',
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const email = (request.query as { email?: string })?.email;
+        
+        if (!email) {
+          sendError(reply, 'VALIDATION_ERROR', 'Email parameter is required', 400);
+          return;
+        }
+
+        // Use SERVICE ROLE to query auth.users (no session required)
+        const { getSupabaseClient } = await import('../../lib/supabase/client.js');
+        const supabase = getSupabaseClient();
+        
+        try {
+          // Use Admin API to find user by email
+          const { data: { users }, error } = await supabase.auth.admin.listUsers();
+          
+          if (error) {
+            request.log.error(error, 'Failed to check verification status');
+            sendSuccess(reply, { verified: false });
+            return;
+          }
+
+          const user = users?.find(u => u.email?.toLowerCase() === email.toLowerCase());
+          if (!user) {
+            // User not found - return verified: false (not 500)
+            sendSuccess(reply, { verified: false });
+            return;
+          }
+
+          // Check email_confirmed_at to determine verification status
+          const verified = !!user.email_confirmed_at;
+
+          sendSuccess(reply, { verified });
+        } catch (error) {
+          request.log.error(error, 'Failed to check verification status by email');
+          sendSuccess(reply, { verified: false });
+        }
+      } catch (error) {
+        request.log.error(error, 'Failed to get verification status');
+        sendSuccess(reply, { verified: false });
+      }
+    }
+  );
+
+  /**
    * GET /api/v1/auth/csrf-token
    * Get CSRF token for cookie-based auth
    * NEW ENDPOINT
@@ -381,14 +433,20 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         } else {
           const message = error instanceof Error ? error.message : 'Failed to bootstrap user';
           
+          // Extract step from error message if present
+          const stepMatch = message.match(/\[Bootstrap Step: ([^\]]+)\]/);
+          const step = stepMatch ? stepMatch[1] : 'Unknown';
+          
           request.log.error({ 
             userId: request.auth?.userId, 
             error: message,
+            step,
             stack: error instanceof Error ? error.stack : undefined
           }, 'Failed to bootstrap user');
           
-          // Return structured error for bootstrap failures
+          // Return structured error for bootstrap failures with step information
           sendError(reply, 'bootstrap_failed', message, 500, {
+            step,
             details: message,
           });
         }
