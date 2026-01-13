@@ -27,5 +27,10 @@
 - **Enhanced:** `GET /api/v1/auth/session` - Now returns `email_verified` status in response
 - **Enhanced:** `GET /api/v1/auth/me` - Returns `email_verified` status, supports checking by email query parameter when no session token exists
 
+### Fixed - Empty JSON Body Handling
+- **Fixed:** `POST /api/v1/auth/bootstrap` - Now accepts empty JSON bodies (frontend may send `Content-Type: application/json` with empty body)
+- Added custom content type parser for auth routes to gracefully handle empty JSON bodies
+- Resolves error: "Body cannot be empty when content-type is set to 'application/json'"
+
 ### Purpose
 Enables frontend polling to detect email verification even when verification link is clicked in a different browser/device. Frontend can now check verification status by calling `GET /api/proxy/auth/me?email={email}` instead of relying on local cookies.

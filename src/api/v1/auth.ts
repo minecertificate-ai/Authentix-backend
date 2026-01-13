@@ -19,6 +19,21 @@ import { config } from '../../lib/config/env.js';
  * Register auth routes
  */
 export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
+  // Add custom content type parser for auth routes to allow empty JSON bodies
+  // (needed for bootstrap endpoint which doesn't require a body)
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    try {
+      // Allow empty body - return empty object if body is empty or whitespace
+      if (!body || body.trim() === '') {
+        done(null, {});
+      } else {
+        done(null, JSON.parse(body));
+      }
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   /**
    * POST /api/v1/auth/login
    * Login user
@@ -319,6 +334,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
    * Bootstrap user after email verification
    * Creates organization, membership, and trial (idempotent)
    * Requires valid JWT (but NOT organization membership - that's what we're creating)
+   * Note: This endpoint doesn't require a request body (empty JSON body is allowed)
    */
   app.post(
     '/auth/bootstrap',
