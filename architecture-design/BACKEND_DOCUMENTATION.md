@@ -192,7 +192,7 @@ API routes handle HTTP concerns:
 4. **Rate Limiting** → Enforces per-instance rate limits
 5. **CSRF Protection** → Validates CSRF tokens (cookie-based auth)
 6. **Auth Middleware** → Verifies JWT token (with cache)
-7. **Context Middleware** → Attaches user/company context
+7. **Context Middleware** → Attaches user/organization context
 8. **Idempotency Check** → Prevents duplicate operations (if enabled)
 9. **Route Handler** → Parses request, calls service
 10. **Service Layer** → Executes business logic
@@ -202,14 +202,23 @@ API routes handle HTTP concerns:
 
 ### Authentication Flow
 
-1. **Login/Signup** → `AuthService` uses Supabase anon client
-2. **Token Generation** → Supabase returns JWT tokens
-3. **Token Storage** → Frontend stores in HttpOnly cookies (XSS protection)
-4. **API Requests** → Bearer token in `Authorization` header or cookie
-5. **Cache Check** → JWT verification cache checked (LRU, 10K entries)
-6. **JWT Verification** → `JWTVerifier` validates token (if cache miss)
+**New User Signup Flow (Email Verification Required)**:
+1. **Signup** → `AuthService.signup()` creates Supabase auth user
+2. **Verification Email** → Supabase sends email verification link (NO session granted)
+3. **User Clicks Link** → Verifies email via Supabase
+4. **Login** → User can now login with verified email
+5. **Bootstrap** → Frontend calls `/auth/bootstrap` to create organization + membership
+6. **Dashboard Access** → User can now access dashboard with organization context
+
+**Authenticated Request Flow**:
+1. **Login** → `AuthService.login()` checks email verification, returns JWT tokens
+2. **Token Storage** → Frontend stores in HttpOnly cookies (XSS protection)
+3. **API Requests** → Bearer token in `Authorization` header or cookie
+4. **Cache Check** → JWT verification cache checked (LRU, 10K entries)
+5. **JWT Verification** → `JWTVerifier` validates token (if cache miss)
+6. **Organization Lookup** → Queries `organization_members` table for active membership
 7. **Cache Update** → Successful verification cached (97% faster on hit)
-8. **Context Extraction** → User ID, company ID, role extracted
+8. **Context Extraction** → User ID, organization ID, role extracted
 9. **Request Processing** → Context attached to request
 
 ### File Upload Flow
@@ -229,26 +238,63 @@ API routes handle HTTP concerns:
 
 ### Authentication (`/api/v1/auth`)
 
-**POST `/auth/login`**
-- **Purpose**: User login
+**POST `/auth/signup`**
+- **Purpose**: User registration (sends verification email, NO session)
 - **Auth**: None (public)
+- **Rate Limit**: 5 requests/min
+- **Request**: `{ email: string, password: string, full_name: string, company_name: string }`
+- **Response**: `{ message: "verification_email_sent" }`
+- **Service**: `AuthService.signup()`
+- **Database**: Supabase Auth (creates auth user)
+- **Validation**: Email domain validation (rejects personal emails like gmail, yahoo)
+- **Behavior**:
+  - Stores full_name and company_name in user_metadata for later use
+  - Sends verification email via Supabase (emailRedirectTo: FRONTEND_URL/auth/callback)
+  - Does NOT create organization or profile yet
+  - Does NOT return session tokens
+
+**POST `/auth/login`**
+- **Purpose**: User login (blocks unverified users)
+- **Auth**: None (public)
+- **Rate Limit**: 5 requests/min
 - **Request**: `{ email: string, password: string }`
 - **Response**: `{ user: User, session: Session }`
 - **Service**: `AuthService.login()`
-- **Database**: `users` table (via Supabase Auth)
+- **Database**: `profiles` table, Supabase Auth
+- **Behavior**:
+  - Checks email_confirmed_at field
+  - Returns 400 with code "EMAIL_NOT_VERIFIED" if not verified
+  - Returns session tokens only if verified
+  - Queries `profiles` table for user data
 
-**POST `/auth/signup`**
-- **Purpose**: User registration
+**POST `/auth/bootstrap`**
+- **Purpose**: Bootstrap user after email verification (idempotent)
+- **Auth**: Required (Bearer token)
+- **Request**: None
+- **Response**: `{ organization, membership, user, trial }`
+- **Service**: `AuthService.bootstrap()`
+- **Database**: `profiles`, `organizations`, `organization_members`, `organization_roles`, `app_audit_logs`
+- **Behavior**:
+  - Creates profile if missing (first_name, last_name from user_metadata)
+  - Creates organization with unique slug and application_id
+  - Creates system roles (owner, admin, member) if missing
+  - Creates organization_members row with owner role
+  - Sets up 7-day trial with 10 free certificates
+  - Writes audit logs (org.created, member.joined)
+  - **Idempotent**: Safe to call multiple times, returns existing data
+
+**POST `/auth/resend-verification`**
+- **Purpose**: Resend verification email
 - **Auth**: None (public)
-- **Request**: `{ email: string, password: string, full_name: string, company_name: string }`
-- **Response**: `{ user: User, session: Session }`
-- **Service**: `AuthService.signup()`
-- **Database**: `users` table (via Supabase Auth)
-- **Validation**: Email domain validation (rejects personal emails)
+- **Rate Limit**: 5 requests/min
+- **Request**: `{ email: string }`
+- **Response**: `{ message: "verification_email_sent" }`
+- **Service**: `AuthService.resendVerificationEmail()`
+- **Database**: Supabase Auth
 
 **POST `/auth/logout`**
 - **Purpose**: User logout
-- **Auth**: Required (Bearer token)
+- **Auth**: Required (Bearer token or cookie)
 - **Request**: None
 - **Response**: `{ message: string }`
 - **Service**: `AuthService.logout()`
@@ -256,11 +302,17 @@ API routes handle HTTP concerns:
 
 **GET `/auth/session`**
 - **Purpose**: Verify session and get user info
-- **Auth**: Required (Bearer token)
+- **Auth**: Required (Bearer token or cookie)
 - **Request**: None
 - **Response**: `{ user: User | null, valid: boolean }`
 - **Service**: `AuthService.verifySession()`
-- **Database**: `users` table
+- **Database**: `profiles` table
+
+**GET `/auth/csrf-token`**
+- **Purpose**: Get CSRF token for cookie-based auth
+- **Auth**: None
+- **Request**: None
+- **Response**: `{ csrf_token: string }`
 
 ### Templates (`/api/v1/templates`)
 
@@ -548,26 +600,38 @@ API routes handle HTTP concerns:
 ### Users (`/api/v1/users`)
 
 **GET `/users/me`**
-- **Purpose**: Get user profile
+- **Purpose**: Get user profile with organization info
 - **Auth**: Required
-- **Response**: `{ id, email, full_name, company_id, company: { name, logo } }`
+- **Response**: `{ id, email, first_name, last_name, full_name, organization: { id, name, slug, logo }, membership: { id, organization_id, username, role, status } }`
 - **Service**: `UserService.getProfile()`
-- **Repository**: `UserRepository.findById()`
-- **Database**: `users`, `companies` tables
+- **Repository**: `UserRepository.getProfile()`
+- **Database**: `profiles`, `organizations`, `organization_members`, `organization_roles` tables
+- **Behavior**:
+  - Returns profile from `profiles` table
+  - Joins with active organization membership
+  - Includes organization details and role
 
 ## Domain Details
 
 ### Auth Domain
 
 **Service**: `AuthService`
-- `login(dto)`: Authenticate user with Supabase Auth
-- `signup(dto)`: Register new user (validates email domain)
+- `login(dto)`: Authenticate user with Supabase Auth (blocks unverified users)
+- `signup(dto)`: Register new user and send verification email (NO session)
+- `bootstrap(userId)`: Create organization + membership + trial (idempotent)
+- `resendVerificationEmail(email)`: Resend verification email
 - `verifySession(token)`: Verify JWT and get user info
 - `logout(token)`: Logout (acknowledges Supabase limitation)
 
 **Types**: `LoginDTO`, `SignupDTO`, `AuthResponse`, `SessionResponse`
 
-**Database**: Uses Supabase Auth (anon client) + `users` table (service client)
+**Database**: Uses Supabase Auth (anon client) + `profiles`, `organizations`, `organization_members`, `organization_roles`, `app_audit_logs` tables (service client)
+
+**Key Changes**:
+- Signup now requires email verification before access
+- Bootstrap endpoint creates organization after verification
+- All references changed from company → organization
+- Trial setup (7 days, 10 free certificates) during bootstrap
 
 ### Templates Domain
 
@@ -767,14 +831,14 @@ API routes handle HTTP concerns:
 ### Users Domain
 
 **Service**: `UserService`
-- `getProfile(userId)`: Get user with company info
+- `getProfile(userId)`: Get user with organization and membership info
 
 **Repository**: `UserRepository`
-- `findById(id)`: Query `users` with company join
+- `getProfile(id)`: Query `profiles` with organization_members and organizations join
 
-**Types**: `UserProfile`
+**Types**: `UserProfile` (includes first_name, last_name, organization, membership)
 
-**Database**: `users`, `companies` tables
+**Database**: `profiles`, `organizations`, `organization_members`, `organization_roles` tables
 
 ## Middleware
 
@@ -834,27 +898,35 @@ API routes handle HTTP concerns:
 2. Checks JWT cache (LRU, 10K entries)
 3. Verifies JWT with `JWTVerifier` (if cache miss)
 4. Caches successful verification (97% faster on hit)
-5. Extracts user ID, company ID, role
+5. Extracts user ID, organization ID, role
 6. Attaches to `request.auth`
 
 **Performance**: 150ms → 5ms with cache
 
 **Applied To**: All protected routes (except auth routes)
 
+**Key Changes**: Now uses `organizationId` instead of `companyId`
+
 #### JWT Verifier (`lib/auth/jwt-verifier.ts`)
 
 **Purpose**: Verify Supabase JWT tokens
 
 **Process**:
-1. Decodes JWT token
-2. Verifies signature with Supabase JWT secret
-3. Validates expiration
-4. Extracts user metadata (user_id, company_id, role)
-5. Returns auth context
+1. Verifies JWT with Supabase
+2. Validates expiration
+3. Queries `organization_members` table for active membership
+4. Joins with `organization_roles` to get role key
+5. Extracts user ID, organization ID, role
+6. Returns auth context
 
-**Database**: Queries `users` table to get company_id if not in token
+**Database**: Queries `organization_members` and `organization_roles` tables
 
 **Caching**: Results cached in `jwt-cache.ts` (10K entries, TTL based on token expiration)
+
+**Key Changes**:
+- Now queries organization_members instead of users table
+- Uses organizationId instead of companyId
+- Filters for active membership only (status='active', deleted_at=null)
 
 ### Request Middleware
 
@@ -1012,15 +1084,18 @@ Global error handler:
 - TTL based on token expiration (max 1 hour)
 - Negative cache for invalid tokens (15s TTL)
 - SHA-256 hashed cache keys (never stores raw tokens)
+- **Cached Context**: userId, organizationId, role, exp
 
 **Performance**: 150ms → 5ms (97% faster)
 
 **Functions**:
 - `getCachedAuth(token)`: Get cached verification
-- `setCachedAuth(token, context)`: Cache successful verification
+- `setCachedAuth(token, context)`: Cache successful verification (with organizationId)
 - `setCachedAuthFailure(token)`: Cache invalid token
 - `invalidateCachedAuth(token)`: Invalidate on logout
 - `getJWTCacheStats()`: Cache statistics
+
+**Key Changes**: Now caches `organizationId` instead of `companyId`
 
 #### Dashboard Cache (`lib/cache/dashboard-cache.ts`)
 
@@ -1312,9 +1387,10 @@ The backend implements OWASP Top 10 security best practices:
 ### Data Protection
 
 **Tenant Isolation**
-- company_id filtering on all queries
-- Multi-tenant architecture
-- No cross-company data leakage
+- organization_id filtering on all queries (migrated from company_id)
+- Multi-tenant architecture via organization_members table
+- No cross-organization data leakage
+- Active membership validation (status='active', deleted_at=null)
 
 **Soft Deletes**
 - deleted_at timestamp (data recovery)
@@ -1624,3 +1700,202 @@ The backend implements OWASP Top 10 security best practices:
 - Custom domain certificates
 - Branded verification pages
 - Multi-tenant styling
+
+---
+
+## Recent Migration: Company → Organization (January 2026)
+
+### Overview
+
+The backend authentication system was migrated from a company-based model to an organization-based model with email verification and proper multi-tenant membership management.
+
+### Key Changes
+
+#### 1. Database Schema Migration
+
+**Before (Company-based)**:
+- `users` table with `company_id` column
+- Direct company association
+- No membership table
+- No role management
+
+**After (Organization-based)**:
+- `profiles` table (separate from auth)
+- `organizations` table (replaces companies for auth)
+- `organization_members` table (many-to-many relationship)
+- `organization_roles` table (flexible RBAC)
+- `role_permissions` table (granular permissions)
+
+#### 2. Authentication Flow Changes
+
+**Before**:
+- Signup → immediate access to dashboard
+- No email verification required
+- Company and user created simultaneously
+- Session granted immediately
+
+**After**:
+- Signup → verification email sent (NO session)
+- Email verification required before access
+- Login blocked until email verified
+- Bootstrap endpoint creates organization after verification
+- Trial setup (7 days, 10 free certificates)
+- Audit logs for org creation and membership
+
+#### 3. Code Changes
+
+**Files Modified**:
+- `src/domains/auth/service.ts` - New signup/login/bootstrap flow
+- `src/api/v1/auth.ts` - New endpoints (bootstrap, resend-verification)
+- `src/lib/auth/jwt-verifier.ts` - Query organization_members table
+- `src/lib/auth/middleware.ts` - Use organizationId
+- `src/lib/middleware/context.ts` - Use organizationId
+- `src/lib/types/common.ts` - RequestContext with organizationId
+- `src/lib/cache/jwt-cache.ts` - Cache organizationId
+- `src/domains/users/*` - Return organization + membership
+- `src/api/v1/*.ts` - All routes use organizationId
+
+**Global Replacements**:
+- `companyId` → `organizationId` (everywhere)
+- `company` → `organization` (in context)
+
+#### 4. New Endpoints
+
+**POST /api/v1/auth/bootstrap**
+- Creates organization + membership after email verification
+- Idempotent (safe to call multiple times)
+- Sets up trial (7 days, 10 free certificates)
+- Writes audit logs
+
+**POST /api/v1/auth/resend-verification**
+- Resends verification email
+- Rate-limited (5 req/min)
+
+#### 5. Breaking Changes for Frontend
+
+**Signup Response Changed**:
+```typescript
+// Before
+{ user: User, session: Session }
+
+// After
+{ message: "verification_email_sent" }
+```
+
+**Login Error for Unverified Users**:
+```typescript
+// New error response
+{
+  error: {
+    code: "VALIDATION_ERROR",
+    message: "Please verify your email to continue",
+    details: { code: "EMAIL_NOT_VERIFIED" }
+  }
+}
+```
+
+**New Flow Required**:
+1. User signs up → receives verification email
+2. User clicks verification link → email confirmed
+3. User logs in → receives session tokens
+4. Frontend calls `/auth/bootstrap` → creates organization
+5. User can access dashboard
+
+**GET /users/me Response Changed**:
+```typescript
+// Before
+{
+  id, email, full_name, company_id,
+  company: { name, logo }
+}
+
+// After
+{
+  id, email, first_name, last_name, full_name,
+  organization: { id, name, slug, logo },
+  membership: { id, organization_id, username, role, status }
+}
+```
+
+#### 6. Environment Variables
+
+**Required**:
+- `FRONTEND_URL` - Used for email verification redirect
+
+**Example**:
+```env
+FRONTEND_URL=https://app.authentix.com
+```
+
+#### 7. Backwards Compatibility
+
+**None** - This is a breaking change requiring:
+- Database migration (already applied)
+- Frontend update (required)
+- Existing users need to verify emails (if enforced)
+
+#### 8. Migration Path for Existing Users
+
+If you have existing users in production:
+
+1. **Option A: Grandfathered Access**
+   - Allow existing users without verification
+   - Check if profile exists, skip verification requirement
+   - Only enforce verification for new signups
+
+2. **Option B: Force Verification**
+   - Send verification emails to all existing users
+   - Require verification on next login
+   - Provide resend-verification endpoint
+
+3. **Option C: Automatic Migration**
+   - Run script to create profiles + organizations for existing users
+   - Mark all existing users as verified
+   - Bootstrap their organizations programmatically
+
+**Recommended**: Option C for smooth transition
+
+#### 9. Testing Checklist
+
+- [ ] Signup sends verification email
+- [ ] Login blocked for unverified users
+- [ ] Login works for verified users
+- [ ] Bootstrap creates organization once (idempotent)
+- [ ] Bootstrap returns existing data on subsequent calls
+- [ ] Resend verification works with rate limiting
+- [ ] JWT contains organizationId after bootstrap
+- [ ] All protected routes receive organizationId in context
+- [ ] Users/me returns organization + membership
+- [ ] Audit logs created for org.created and member.joined
+
+#### 10. Monitoring
+
+**Key Metrics to Watch**:
+- Email verification rate (should be >80%)
+- Bootstrap success rate (should be 100%)
+- Login failures due to unverified emails
+- Organization creation failures
+- Audit log entries
+
+**Dashboard Queries**:
+```sql
+-- Unverified users (pending verification)
+SELECT COUNT(*) FROM auth.users WHERE email_confirmed_at IS NULL;
+
+-- Users without organizations
+SELECT COUNT(*) FROM profiles p 
+LEFT JOIN organization_members om ON p.id = om.user_id 
+WHERE om.id IS NULL;
+
+-- Organizations created today
+SELECT COUNT(*) FROM organizations WHERE created_at::date = CURRENT_DATE;
+```
+
+### Benefits of New Architecture
+
+1. **Better Multi-Tenancy**: Users can belong to multiple organizations
+2. **Flexible RBAC**: Role-based permissions per organization
+3. **Email Verification**: Improved security and reduced spam signups
+4. **Audit Trail**: All organization creation tracked
+5. **Trial Management**: Built-in trial period with limits
+6. **Scalability**: Supports complex membership scenarios
