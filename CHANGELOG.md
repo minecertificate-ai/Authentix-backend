@@ -17,5 +17,15 @@
 ### Files changed (backend)
 - `src/lib/auth/jwt-verifier.ts`: add `verifyJWTWithoutMembership`.
 - `src/lib/auth/middleware.ts`: add `jwtOnlyAuthMiddleware`.
-- `src/api/v1/auth.ts`: use JWT-only middleware for bootstrap; add logging.
-- `src/domains/auth/service.ts`: add verbose bootstrap logging.
+- `src/api/v1/auth.ts`: use JWT-only middleware for bootstrap; add logging; add `GET /auth/me` endpoint with email parameter support.
+- `src/domains/auth/service.ts`: add verbose bootstrap logging; update `verifySession` to return `email_verified` status.
+
+## [Unreleased] - 2026-01-XX
+
+### Added - Cross-Device Verification Support
+- **New endpoint:** `GET /api/v1/auth/me?email={email}` - Allows checking email verification status by email parameter (for cross-device/browser polling scenarios)
+- **Enhanced:** `GET /api/v1/auth/session` - Now returns `email_verified` status in response
+- **Enhanced:** `GET /api/v1/auth/me` - Returns `email_verified` status, supports checking by email query parameter when no session token exists
+
+### Purpose
+Enables frontend polling to detect email verification even when verification link is clicked in a different browser/device. Frontend can now check verification status by calling `GET /api/proxy/auth/me?email={email}` instead of relying on local cookies.

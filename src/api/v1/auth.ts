@@ -157,7 +157,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         }
 
         if (!token) {
-          sendSuccess(reply, { user: null, valid: false });
+          sendSuccess(reply, { user: null, valid: false, email_verified: false });
           return;
         }
 
@@ -167,7 +167,92 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         sendSuccess(reply, result);
       } catch (error) {
         request.log.error(error, 'Failed to verify session');
-        sendSuccess(reply, { user: null, valid: false });
+        sendSuccess(reply, { user: null, valid: false, email_verified: false });
+      }
+    }
+  );
+
+  /**
+   * GET /api/v1/auth/me
+   * Get current user info including email verification status
+   * Supports both Bearer token and cookies
+   * Also supports checking by email (for cross-device polling) if no session exists
+   */
+  app.get(
+    '/auth/me',
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        // Try to get token from either source
+        const authHeader = request.headers.authorization;
+        const cookies = request.cookies as Record<string, string>;
+        const cookieToken = getTokenFromCookies(cookies);
+
+        let token: string | undefined;
+
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          token = authHeader.substring(7);
+        } else if (cookieToken) {
+          token = cookieToken;
+        }
+
+        const service = new AuthService();
+        
+        // If token exists, verify session and get full user info
+        if (token) {
+          const result = await service.verifySession(token);
+          sendSuccess(reply, {
+            ...result,
+            email_verified: result.valid && result.user ? true : false,
+          });
+          return;
+        }
+
+        // If no token, check if email is provided for cross-device verification check
+        const email = (request.query as { email?: string })?.email;
+        if (email) {
+          const { getSupabaseClient } = await import('../../lib/supabase/client.js');
+          const supabase = getSupabaseClient();
+          
+          // Check verification status by email (for cross-device polling)
+          // Use Admin API to find user by email
+          try {
+            // List users and find by email (Admin API doesn't have direct getUserByEmail)
+            const { data: { users }, error } = await supabase.auth.admin.listUsers();
+            
+            if (error) {
+              request.log.error(error, 'Failed to check verification status');
+              sendSuccess(reply, { user: null, valid: false, email_verified: false });
+              return;
+            }
+
+            const user = users?.find(u => u.email?.toLowerCase() === email.toLowerCase());
+            if (!user) {
+              sendSuccess(reply, { user: null, valid: false, email_verified: false });
+              return;
+            }
+
+            sendSuccess(reply, {
+              user: {
+                id: user.id,
+                email: user.email || '',
+                full_name: (user.user_metadata?.full_name as string) || null,
+              },
+              valid: !!user.email_confirmed_at,
+              email_verified: !!user.email_confirmed_at,
+            });
+            return;
+          } catch (error) {
+            request.log.error(error, 'Failed to check verification status by email');
+            sendSuccess(reply, { user: null, valid: false, email_verified: false });
+            return;
+          }
+        }
+
+        // No token and no email provided
+        sendSuccess(reply, { user: null, valid: false, email_verified: false });
+      } catch (error) {
+        request.log.error(error, 'Failed to get user info');
+        sendSuccess(reply, { user: null, valid: false, email_verified: false });
       }
     }
   );

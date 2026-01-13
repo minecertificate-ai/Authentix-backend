@@ -140,13 +140,13 @@ export class AuthService {
   /**
    * Verify session token
    */
-  async verifySession(accessToken: string): Promise<SessionResponse> {
+  async verifySession(accessToken: string): Promise<SessionResponse & { email_verified?: boolean }> {
     // Create a client with the access token
     const url = process.env.SUPABASE_URL;
     const anonKey = process.env.SUPABASE_ANON_KEY;
 
     if (!url || !anonKey) {
-      return { user: null, valid: false };
+      return { user: null, valid: false, email_verified: false };
     }
 
     const client = createClient(url, anonKey, {
@@ -164,7 +164,7 @@ export class AuthService {
     const { data: { user }, error } = await client.auth.getUser();
 
     if (error || !user) {
-      return { user: null, valid: false };
+      return { user: null, valid: false, email_verified: false };
     }
 
     // Get user profile using service role client for database access
@@ -172,18 +172,23 @@ export class AuthService {
     const serviceClient = getSupabaseClient();
     
     const { data: userProfile } = await serviceClient
-      .from('users')
-      .select('full_name')
+      .from('profiles')
+      .select('first_name, last_name')
       .eq('id', user.id)
-      .single();
+      .maybeSingle();
+
+    const fullName = userProfile
+      ? `${(userProfile as any).first_name || ''} ${(userProfile as any).last_name || ''}`.trim() || null
+      : null;
 
     return {
       user: {
         id: user.id,
         email: user.email || '',
-        full_name: (userProfile as { full_name: string | null } | null)?.full_name || null,
+        full_name: fullName,
       },
       valid: true,
+      email_verified: !!user.email_confirmed_at,
     };
   }
 
