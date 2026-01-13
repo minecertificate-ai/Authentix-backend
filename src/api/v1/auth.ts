@@ -269,8 +269,9 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           request.log.warn({ userId: request.auth?.userId, error: error.message }, 'Bootstrap validation error');
           sendError(reply, 'VALIDATION_ERROR', error.message, 400);
         } else {
-          request.log.error({ userId: request.auth?.userId, error }, 'Failed to bootstrap user');
-          sendError(reply, 'INTERNAL_ERROR', 'Failed to bootstrap user', 500);
+          const message = error instanceof Error ? error.message : 'Failed to bootstrap user';
+          request.log.error({ userId: request.auth?.userId, error: message }, 'Failed to bootstrap user');
+          sendError(reply, 'INTERNAL_ERROR', message, 500);
         }
       }
     }

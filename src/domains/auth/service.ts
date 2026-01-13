@@ -227,6 +227,7 @@ export class AuthService {
     user: any;
     trial: { start_at: string; end_at: string; free_certificates: number };
   }> {
+    const crypto = await import('node:crypto');
     const { getSupabaseClient } = await import('../../lib/supabase/client.js');
     const supabase = getSupabaseClient();
 
@@ -347,12 +348,15 @@ export class AuthService {
     }
 
     // Generate unique slug for organization
-    const baseSlug = companyName
+    const baseSlugRaw = companyName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
 
-    let slug = baseSlug;
+    // Fallback to a non-empty base slug
+    const baseSlug = baseSlugRaw || 'org';
+
+    let slug = `${baseSlug}-${crypto.randomBytes(3).toString('hex')}`;
     let suffix = 1;
 
     while (true) {
@@ -367,7 +371,7 @@ export class AuthService {
       }
 
       if (!existing) break;
-      slug = `${baseSlug}-${suffix++}`;
+      slug = `${baseSlug}-${crypto.randomBytes(2).toString('hex')}-${suffix++}`;
     }
 
     console.log(`[Bootstrap] Generated unique slug: ${slug}`);
