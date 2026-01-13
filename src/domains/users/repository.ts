@@ -11,41 +11,73 @@ export class UserRepository {
   constructor(private readonly supabase: SupabaseClient) {}
 
   /**
-   * Get user profile with company info
+   * Get user profile with organization info
    */
   async getProfile(userId: string): Promise<UserProfile | null> {
-    const { data, error } = await this.supabase
-      .from('users')
-      .select(`
-        id,
-        email,
-        full_name,
-        company_id,
-        companies:company_id (
-          name,
-          logo
-        )
-      `)
+    // Get profile
+    const { data: profile, error: profileError } = await this.supabase
+      .from('profiles')
+      .select('id, email, first_name, last_name')
       .eq('id', userId)
-      .is('deleted_at', null)
       .maybeSingle();
 
-    if (error) {
-      throw new Error(`Failed to get user profile: ${error.message}`);
+    if (profileError) {
+      throw new Error(`Failed to get user profile: ${profileError.message}`);
     }
 
-    if (!data) {
+    if (!profile) {
       return null;
     }
 
+    // Get active organization membership
+    const { data: membership, error: memberError } = await this.supabase
+      .from('organization_members')
+      .select(`
+        id,
+        organization_id,
+        username,
+        status,
+        organizations:organization_id (
+          id,
+          name,
+          slug,
+          logo
+        ),
+        organization_roles:role_id (
+          key
+        )
+      `)
+      .eq('user_id', userId)
+      .eq('status', 'active')
+      .is('deleted_at', null)
+      .maybeSingle();
+
+    if (memberError && memberError.code !== 'PGRST116') {
+      throw new Error(`Failed to get organization membership: ${memberError.message}`);
+    }
+
+    const fullName = profile.first_name && profile.last_name
+      ? `${profile.first_name} ${profile.last_name}`.trim()
+      : profile.first_name || profile.last_name || null;
+
     return {
-      id: data.id,
-      email: data.email,
-      full_name: data.full_name,
-      company_id: data.company_id,
-      company: (data as any).companies ? {
-        name: (data as any).companies.name,
-        logo: (data as any).companies.logo,
+      id: profile.id,
+      email: profile.email,
+      first_name: profile.first_name,
+      last_name: profile.last_name,
+      full_name: fullName,
+      organization: membership ? {
+        id: (membership as any).organizations.id,
+        name: (membership as any).organizations.name,
+        slug: (membership as any).organizations.slug,
+        logo: (membership as any).organizations.logo,
+      } : null,
+      membership: membership ? {
+        id: membership.id,
+        organization_id: membership.organization_id,
+        username: membership.username,
+        role: (membership as any).organization_roles?.key || 'member',
+        status: membership.status,
       } : null,
     };
   }

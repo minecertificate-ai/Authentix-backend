@@ -37,7 +37,7 @@ export interface PaginatedResponse<T> {
 
 export interface RequestContext {
   userId: string;
-  companyId: string;
+  organizationId: string;
   role: string;
   requestId: string;
 }

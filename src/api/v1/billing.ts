@@ -38,7 +38,7 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
         const service = new BillingService(repository);
 
         const { invoices, total } = await service.listInvoices(
-          request.context!.companyId,
+          request.context!.organizationId,
           {
             status,
             page,
@@ -79,7 +79,7 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
 
         const result = await service.getInvoiceWithLineItems(
           id,
-          request.context!.companyId
+          request.context!.organizationId
         );
 
         sendSuccess(reply, result);
@@ -105,7 +105,7 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
         const repository = new BillingRepository(getSupabaseClient());
         const service = new BillingService(repository);
 
-        const overview = await service.getBillingOverview(request.context!.companyId);
+        const overview = await service.getBillingOverview(request.context!.organizationId);
 
         sendSuccess(reply, overview);
       } catch (error) {

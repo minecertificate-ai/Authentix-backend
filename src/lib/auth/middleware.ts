@@ -16,7 +16,7 @@ declare module 'fastify' {
   interface FastifyRequest {
     auth?: {
       userId: string;
-      companyId: string;
+      organizationId: string;
       role: string;
     };
     authSource?: 'bearer' | 'cookie'; // Track auth method for CSRF enforcement
@@ -76,13 +76,13 @@ export async function authMiddleware(
         // Cache hit!
         request.log.debug({
           userId: cached.userId,
-          companyId: cached.companyId,
+          organizationId: cached.organizationId,
           cacheHit: true,
         }, 'JWT cache hit');
 
         context = {
           userId: cached.userId,
-          companyId: cached.companyId,
+          organizationId: cached.organizationId,
           role: cached.role,
         };
       } else {
@@ -92,14 +92,14 @@ export async function authMiddleware(
         // Cache successful verification
         setCachedAuth(token, {
           userId: context.userId,
-          companyId: context.companyId,
+          organizationId: context.organizationId,
           role: context.role,
           exp: getTokenExpiration(token),
         });
 
         request.log.debug({
           userId: context.userId,
-          companyId: context.companyId,
+          organizationId: context.organizationId,
           cacheHit: false,
         }, 'JWT cache miss - cached now');
       }
@@ -147,7 +147,7 @@ export async function optionalAuthMiddleware(
       if (cached) {
         request.auth = {
           userId: cached.userId,
-          companyId: cached.companyId,
+          organizationId: cached.organizationId,
           role: cached.role,
         };
         request.authSource = source;
@@ -164,7 +164,7 @@ export async function optionalAuthMiddleware(
     if (config.JWT_CACHE_ENABLED) {
       setCachedAuth(token, {
         userId: context.userId,
-        companyId: context.companyId,
+        organizationId: context.organizationId,
         role: context.role,
         exp: getTokenExpiration(token),
       });

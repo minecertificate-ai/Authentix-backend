@@ -32,7 +32,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         const repository = new DashboardRepository(getSupabaseClient());
         const service = new DashboardService(repository);
 
-        const data = await service.getDashboardData(request.context!.companyId);
+        const data = await service.getDashboardData(request.context!.organizationId);
 
         sendSuccess(reply, data);
       } catch (error) {

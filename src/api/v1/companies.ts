@@ -34,7 +34,7 @@ export async function registerCompanyRoutes(app: FastifyInstance): Promise<void>
         const repository = new CompanyRepository(getSupabaseClient());
         const service = new CompanyService(repository);
 
-        const company = await service.getById(request.context!.companyId);
+        const company = await service.getById(request.context!.organizationId);
 
         sendSuccess(reply, company);
       } catch (error) {
@@ -96,7 +96,7 @@ export async function registerCompanyRoutes(app: FastifyInstance): Promise<void>
         const repository = new CompanyRepository(getSupabaseClient());
         const service = new CompanyService(repository);
 
-        const company = await service.update(request.context!.companyId, validatedDto, logoFile);
+        const company = await service.update(request.context!.organizationId, validatedDto, logoFile);
 
         sendSuccess(reply, company);
       } catch (error) {
@@ -123,7 +123,7 @@ export async function registerCompanyRoutes(app: FastifyInstance): Promise<void>
         const repository = new CompanyRepository(getSupabaseClient());
         const service = new CompanyService(repository);
 
-        const settings = await service.getAPISettings(request.context!.companyId);
+        const settings = await service.getAPISettings(request.context!.organizationId);
 
         sendSuccess(reply, settings);
       } catch (error) {
@@ -155,7 +155,7 @@ export async function registerCompanyRoutes(app: FastifyInstance): Promise<void>
         const repository = new CompanyRepository(getSupabaseClient());
         const service = new CompanyService(repository);
 
-        await service.updateAPIEnabled(request.context!.companyId, api_enabled);
+        await service.updateAPIEnabled(request.context!.organizationId, api_enabled);
 
         sendSuccess(reply, { api_enabled });
       } catch (error) {
@@ -176,7 +176,7 @@ export async function registerCompanyRoutes(app: FastifyInstance): Promise<void>
         const repository = new CompanyRepository(getSupabaseClient());
         const service = new CompanyService(repository);
 
-        const result = await service.bootstrapIdentity(request.context!.companyId, request.context!.userId);
+        const result = await service.bootstrapIdentity(request.context!.organizationId, request.context!.userId);
 
         sendSuccess(reply, result);
       } catch (error) {
@@ -201,7 +201,7 @@ export async function registerCompanyRoutes(app: FastifyInstance): Promise<void>
         const repository = new CompanyRepository(getSupabaseClient());
         const service = new CompanyService(repository);
 
-        const result = await service.rotateAPIKey(request.context!.companyId);
+        const result = await service.rotateAPIKey(request.context!.organizationId);
 
         sendSuccess(reply, result);
       } catch (error) {

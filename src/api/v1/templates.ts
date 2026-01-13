@@ -49,7 +49,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        const { templates, total } = await service.list(request.context!.companyId, {
+        const { templates, total } = await service.list(request.context!.organizationId, {
           status,
           page,
           limit,
@@ -91,7 +91,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        const template = await service.getById(id, request.context!.companyId);
+        const template = await service.getById(id, request.context!.organizationId);
 
         sendSuccess(reply, template);
       } catch (error) {
@@ -152,7 +152,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const service = new TemplateService(repository);
 
         const template = await service.create(
-          request.context!.companyId,
+          request.context!.organizationId,
           request.context!.userId,
           dto,
           {
@@ -190,7 +190,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        const template = await service.update(id, request.context!.companyId, dto);
+        const template = await service.update(id, request.context!.organizationId, dto);
 
         sendSuccess(reply, template);
       } catch (error) {
@@ -221,7 +221,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        await service.delete(id, request.context!.companyId);
+        await service.delete(id, request.context!.organizationId);
 
         sendSuccess(reply, { id, deleted: true });
       } catch (error) {
@@ -248,7 +248,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        const previewUrl = await service.getPreviewUrl(id, request.context!.companyId);
+        const previewUrl = await service.getPreviewUrl(id, request.context!.organizationId);
 
         sendSuccess(reply, { preview_url: previewUrl });
       } catch (error) {
@@ -273,7 +273,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        const result = await service.getCategories(request.context!.companyId);
+        const result = await service.getCategories(request.context!.organizationId);
 
         sendSuccess(reply, result);
       } catch (error) {

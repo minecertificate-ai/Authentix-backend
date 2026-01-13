@@ -63,8 +63,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
   /**
    * POST /api/v1/auth/signup
-   * Signup user
-   * Sets HttpOnly cookies and returns tokens in body (backward compatible)
+   * Signup user - sends verification email WITHOUT granting session
    */
   app.post(
     '/auth/signup',
@@ -80,15 +79,6 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
         const result = await service.signup(dto);
 
-        // Set HttpOnly cookies (NEW)
-        setAuthCookies(
-          reply,
-          result.session.access_token,
-          result.session.refresh_token,
-          result.session.expires_at
-        );
-
-        // Also return tokens in body for backward compatibility
         sendSuccess(reply, result, 201);
       } catch (error) {
         if (error instanceof ValidationError) {
@@ -200,6 +190,78 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       } catch (error) {
         request.log.error(error, 'Failed to generate CSRF token');
         sendError(reply, 'INTERNAL_ERROR', 'Failed to generate CSRF token', 500);
+      }
+    }
+  );
+
+  /**
+   * POST /api/v1/auth/resend-verification
+   * Resend verification email
+   */
+  app.post(
+    '/auth/resend-verification',
+    {
+      config: {
+        rateLimit: config.RATE_LIMIT_ENABLED ? authRateLimitConfig : false,
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const body = request.body as { email: string };
+
+        if (!body.email) {
+          sendError(reply, 'VALIDATION_ERROR', 'Email is required', 400);
+          return;
+        }
+
+        const service = new AuthService();
+        const result = await service.resendVerificationEmail(body.email);
+
+        sendSuccess(reply, result);
+      } catch (error) {
+        if (error instanceof ValidationError) {
+          sendError(reply, 'VALIDATION_ERROR', error.message, 400);
+        } else {
+          request.log.error(error, 'Failed to resend verification email');
+          sendError(reply, 'INTERNAL_ERROR', 'Failed to resend verification email', 500);
+        }
+      }
+    }
+  );
+
+  /**
+   * POST /api/v1/auth/bootstrap
+   * Bootstrap user after email verification
+   * Creates organization, membership, and trial (idempotent)
+   * Requires valid JWT
+   */
+  app.post(
+    '/auth/bootstrap',
+    {
+      preHandler: async (request: FastifyRequest, reply: FastifyReply) => {
+        // Import auth middleware inline
+        const { authMiddleware } = await import('../../lib/auth/middleware.js');
+        await authMiddleware(request, reply);
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        if (!request.auth?.userId) {
+          sendError(reply, 'UNAUTHORIZED', 'Missing authorization', 401);
+          return;
+        }
+
+        const service = new AuthService();
+        const result = await service.bootstrap(request.auth.userId);
+
+        sendSuccess(reply, result, 201);
+      } catch (error) {
+        if (error instanceof ValidationError) {
+          sendError(reply, 'VALIDATION_ERROR', error.message, 400);
+        } else {
+          request.log.error(error, 'Failed to bootstrap user');
+          sendError(reply, 'INTERNAL_ERROR', 'Failed to bootstrap user', 500);
+        }
       }
     }
   );

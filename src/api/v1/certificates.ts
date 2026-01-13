@@ -44,7 +44,7 @@ export async function registerCertificateRoutes(app: FastifyInstance): Promise<v
         const appUrl = process.env.APP_URL ?? process.env.FRONTEND_URL ?? 'http://localhost:3001';
 
         const result = await certificateService.generateCertificates(
-          request.context!.companyId,
+          request.context!.organizationId,
           request.context!.userId,
           body,
           appUrl

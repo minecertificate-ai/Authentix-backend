@@ -8,7 +8,7 @@ import { getSupabaseClient } from '../supabase/client.js';
 
 export interface AuthContext {
   userId: string;
-  companyId: string;
+  organizationId: string;
   role: string;
 }
 
@@ -23,7 +23,7 @@ export class UnauthorizedError extends Error {
  * Verify JWT token and extract user context
  *
  * @param token - Supabase JWT token
- * @returns User context (userId, companyId, role)
+ * @returns User context (userId, organizationId, role)
  * @throws UnauthorizedError if token is invalid
  */
 export async function verifyJWT(token: string): Promise<AuthContext> {
@@ -39,27 +39,43 @@ export async function verifyJWT(token: string): Promise<AuthContext> {
     throw new UnauthorizedError('Invalid or expired token');
   }
 
-  // Get user record with company_id
-  const { data: userRecord, error: userError } = await supabase
-    .from('users')
-    .select('id, company_id, role')
-    .eq('id', user.id)
+  // Get organization membership with role
+  const { data: membership, error: memberError } = await supabase
+    .from('organization_members')
+    .select(`
+      id,
+      organization_id,
+      user_id,
+      status,
+      organization_roles:role_id (
+        key
+      )
+    `)
+    .eq('user_id', user.id)
+    .eq('status', 'active')
     .is('deleted_at', null)
     .maybeSingle();
 
-  if (userError || !userRecord) {
-    throw new UnauthorizedError('User not found');
+  if (memberError || !membership) {
+    throw new UnauthorizedError('User has no active organization membership');
   }
 
-  const record = userRecord as { id: string; company_id: string | null; role: string | null } | null;
-  if (!record || !record.company_id) {
-    throw new UnauthorizedError('User has no company');
+  const memberRecord = membership as {
+    id: string;
+    organization_id: string;
+    user_id: string;
+    status: string;
+    organization_roles: { key: string } | null;
+  };
+
+  if (!memberRecord.organization_id) {
+    throw new UnauthorizedError('User has no organization');
   }
 
   return {
-    userId: record.id,
-    companyId: record.company_id,
-    role: record.role ?? 'member',
+    userId: user.id,
+    organizationId: memberRecord.organization_id,
+    role: memberRecord.organization_roles?.key ?? 'member',
   };
 }
 

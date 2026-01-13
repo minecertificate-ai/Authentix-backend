@@ -21,7 +21,7 @@ import { config } from '../config/env.js';
  */
 export interface CachedAuthContext {
   userId: string;
-  companyId: string;
+  organizationId: string;
   role: string;
   exp: number; // Token expiration timestamp (seconds)
   cachedAt: number; // When this was cached (ms)

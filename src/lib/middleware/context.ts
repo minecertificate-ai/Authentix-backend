@@ -31,16 +31,16 @@ export async function contextMiddleware(
   // Create request context
   request.context = {
     userId: request.auth.userId,
-    companyId: request.auth.companyId,
+    organizationId: request.auth.organizationId,
     role: request.auth.role,
     requestId: request.id ?? 'unknown',
   };
 
   // Create child logger with context
-  // All subsequent logs will include userId, companyId, role
+  // All subsequent logs will include userId, organizationId, role
   request.log = request.log.child({
     userId: request.auth.userId,
-    companyId: request.auth.companyId,
+    organizationId: request.auth.organizationId,
     role: request.auth.role,
   });
 }

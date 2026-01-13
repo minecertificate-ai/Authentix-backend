@@ -40,7 +40,7 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
         const repository = new ImportRepository(getSupabaseClient());
         const service = new ImportService(repository);
 
-        const { jobs, total } = await service.list(request.context!.companyId, {
+        const { jobs, total } = await service.list(request.context!.organizationId, {
           status,
           page,
           limit,
@@ -81,7 +81,7 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
         const repository = new ImportRepository(getSupabaseClient());
         const service = new ImportService(repository);
 
-        const job = await service.getById(id, request.context!.companyId);
+        const job = await service.getById(id, request.context!.organizationId);
 
         sendSuccess(reply, job);
       } catch (error) {
@@ -142,7 +142,7 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
         const service = new ImportService(repository);
 
         const job = await service.create(
-          request.context!.companyId,
+          request.context!.organizationId,
           request.context!.userId,
           dto,
           {
@@ -182,7 +182,7 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
 
         const { rows, total } = await service.getDataRows(
           id,
-          request.context!.companyId,
+          request.context!.organizationId,
           { page, limit }
         );
 
@@ -219,7 +219,7 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
         const repository = new ImportRepository(getSupabaseClient());
         const service = new ImportService(repository);
 
-        const downloadUrl = await service.getFileUrl(id, request.context!.companyId);
+        const downloadUrl = await service.getFileUrl(id, request.context!.organizationId);
 
         sendSuccess(reply, { download_url: downloadUrl });
       } catch (error) {
