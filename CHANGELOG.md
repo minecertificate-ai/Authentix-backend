@@ -34,3 +34,35 @@
 
 ### Purpose
 Enables frontend polling to detect email verification even when verification link is clicked in a different browser/device. Frontend can now check verification status by calling `GET /api/proxy/auth/me?email={email}` instead of relying on local cookies.
+
+## [Unreleased] - 2026-01-XX (Bootstrap Schema Fix)
+
+### Fixed - Bootstrap Column Name Mismatches
+- **Root cause:** Bootstrap service was using old column names that don't exist in the database schema:
+  - `trial_start` → `trial_started_at`
+  - `trial_end` → `trial_ends_at`
+  - `free_certificates_included` → `trial_free_certificates_limit`
+  - `billing_status: 'trial'` → `billing_status: 'trialing'`
+  - Missing `trial_free_certificates_used` (default 0)
+  - Audit logs: `user_id` → `actor_user_id`, `resource_type` → `entity_type`, `resource_id` → `entity_id`
+
+- **Fixes:**
+  - Updated membership check query to use correct column names (`trial_started_at`, `trial_ends_at`, `trial_free_certificates_limit`)
+  - Fixed organization insert payload to use correct columns and values
+  - Updated bootstrap return type mapping to use correct column names
+  - Fixed audit log inserts to use `actor_user_id`, `entity_type`, `entity_id`
+  - Added structured error responses with `bootstrap_failed` error code
+  - Added logging of insert payload keys when organization creation fails
+  - Ensured all bootstrap DB operations use service role client (bypasses RLS)
+
+- **Files changed:**
+  - `src/domains/auth/service.ts`: Fixed all column references in bootstrap method
+  - `src/api/v1/auth.ts`: Enhanced error handling with structured error responses
+
+- **Verification:**
+  - Bootstrap now creates organization with correct trial columns
+  - `trial_ends_at` is set to 7 days from creation
+  - `billing_status` is set to `'trialing'`
+  - `trial_free_certificates_limit` is set to 10
+  - `trial_free_certificates_used` is set to 0
+  - Audit logs are created with correct field names

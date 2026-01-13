@@ -253,9 +253,10 @@ export class AuthService {
           slug,
           application_id,
           billing_status,
-          trial_start,
-          trial_end,
-          free_certificates_included
+          trial_started_at,
+          trial_ends_at,
+          trial_free_certificates_limit,
+          trial_free_certificates_used
         )
       `)
       .eq('user_id', userId)
@@ -294,9 +295,9 @@ export class AuthService {
         },
         user: profile,
         trial: {
-          start_at: org.trial_start,
-          end_at: org.trial_end,
-          free_certificates: org.free_certificates_included || 10,
+          start_at: org.trial_started_at || new Date().toISOString(),
+          end_at: org.trial_ends_at || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          free_certificates: org.trial_free_certificates_limit || 10,
         },
       };
     }
@@ -391,24 +392,32 @@ export class AuthService {
     const trialEnd = new Date(trialStart.getTime() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
     console.log(`[Bootstrap] Creating organization: name="${companyName}", slug="${slug}"`);
+    
+    // Build insert payload with only existing columns
+    const orgInsertPayload = {
+      name: companyName,
+      slug,
+      application_id: applicationId,
+      email: authUser.email,
+      billing_status: 'trialing',
+      trial_started_at: trialStart.toISOString(),
+      trial_ends_at: trialEnd.toISOString(),
+      trial_free_certificates_limit: 10,
+      trial_free_certificates_used: 0,
+    };
+    
+    console.log(`[Bootstrap] Organization insert payload keys:`, Object.keys(orgInsertPayload));
+    
     const { data: newOrg, error: orgError } = await supabase
       .from('organizations')
-      .insert({
-        name: companyName,
-        slug,
-        application_id: applicationId,
-        email: authUser.email,
-        billing_status: 'trial',
-        trial_start: trialStart.toISOString(),
-        trial_end: trialEnd.toISOString(),
-        free_certificates_included: 10,
-      } as any)
+      .insert(orgInsertPayload)
       .select()
       .single();
 
     if (orgError) {
       console.error(`[Bootstrap] Error creating organization: ${orgError.message}`, orgError);
       console.error(`[Bootstrap] Error details:`, JSON.stringify(orgError, null, 2));
+      console.error(`[Bootstrap] Insert payload keys that failed:`, Object.keys(orgInsertPayload));
       throw new Error(`Failed to create organization: ${orgError.message}`);
     }
     if (!newOrg) {
@@ -522,18 +531,18 @@ export class AuthService {
     const { error: auditError } = await supabase.from('app_audit_logs').insert([
       {
         organization_id: (newOrg as any).id,
-        user_id: userId,
+        actor_user_id: userId,
         action: 'org.created',
-        resource_type: 'organization',
-        resource_id: (newOrg as any).id,
+        entity_type: 'organization',
+        entity_id: (newOrg as any).id,
         metadata: { name: companyName, slug },
       },
       {
         organization_id: (newOrg as any).id,
-        user_id: userId,
+        actor_user_id: userId,
         action: 'member.joined',
-        resource_type: 'organization_member',
-        resource_id: (newMembership as any).id,
+        entity_type: 'organization_member',
+        entity_id: (newMembership as any).id,
         metadata: { role: 'owner', username },
       },
     ] as any);
@@ -562,9 +571,9 @@ export class AuthService {
       membership: newMembership,
       user: profile,
       trial: {
-        start_at: trialStart.toISOString(),
-        end_at: trialEnd.toISOString(),
-        free_certificates: 10,
+        start_at: (newOrg as any).trial_started_at || trialStart.toISOString(),
+        end_at: (newOrg as any).trial_ends_at || trialEnd.toISOString(),
+        free_certificates: (newOrg as any).trial_free_certificates_limit || 10,
       },
     };
   }
