@@ -20,11 +20,11 @@ export class UnauthorizedError extends Error {
 }
 
 /**
- * Verify JWT token and extract user context
+ * Verify JWT token and extract user context (requires membership)
  *
  * @param token - Supabase JWT token
  * @returns User context (userId, organizationId, role)
- * @throws UnauthorizedError if token is invalid
+ * @throws UnauthorizedError if token is invalid or no membership
  */
 export async function verifyJWT(token: string): Promise<AuthContext> {
   const supabase = getSupabaseClient();
@@ -76,6 +76,32 @@ export async function verifyJWT(token: string): Promise<AuthContext> {
     userId: user.id,
     organizationId: memberRecord.organization_id,
     role: memberRecord.organization_roles?.key ?? 'member',
+  };
+}
+
+/**
+ * Verify JWT token without requiring organization membership
+ * Used for bootstrap endpoint where membership doesn't exist yet
+ *
+ * @param token - Supabase JWT token
+ * @returns User ID only
+ * @throws UnauthorizedError if token is invalid
+ */
+export async function verifyJWTWithoutMembership(token: string): Promise<{ userId: string }> {
+  const supabase = getSupabaseClient();
+
+  // Verify JWT and get user
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser(token);
+
+  if (authError || !user) {
+    throw new UnauthorizedError('Invalid or expired token');
+  }
+
+  return {
+    userId: user.id,
   };
 }
 

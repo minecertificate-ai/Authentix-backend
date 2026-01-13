@@ -7,7 +7,7 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { verifyJWT, extractTokenFromHeader, UnauthorizedError } from './jwt-verifier.js';
+import { verifyJWT, verifyJWTWithoutMembership, extractTokenFromHeader, UnauthorizedError } from './jwt-verifier.js';
 import { getTokenFromCookies } from '../security/cookie-config.js';
 import { getCachedAuth, setCachedAuth, setCachedAuthFailure } from '../cache/jwt-cache.js';
 import { config } from '../config/env.js';
@@ -172,6 +172,47 @@ export async function optionalAuthMiddleware(
   } catch (error) {
     // Ignore auth errors for optional auth
     request.log.warn({ error }, 'Optional auth failed');
+  }
+}
+
+/**
+ * JWT-only auth middleware (no membership required)
+ *
+ * Verifies JWT token but does NOT require organization membership.
+ * Used for bootstrap endpoint where membership doesn't exist yet.
+ */
+export async function jwtOnlyAuthMiddleware(
+  request: FastifyRequest,
+  _reply: FastifyReply
+): Promise<void> {
+  const { token, source } = extractToken(request);
+
+  if (!token || !source) {
+    throw new UnauthorizedError('Missing authorization token');
+  }
+
+  try {
+    // Verify JWT without membership requirement
+    const { userId } = await verifyJWTWithoutMembership(token);
+
+    // Attach minimal auth context (no organizationId or role)
+    request.auth = {
+      userId,
+      organizationId: '', // Not available yet
+      role: '', // Not available yet
+    };
+    request.authSource = source;
+
+    request.log.debug({
+      userId,
+      source,
+    }, 'JWT-only auth verified (no membership required)');
+
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      throw error;
+    }
+    throw new UnauthorizedError('Token verification failed');
   }
 }
 

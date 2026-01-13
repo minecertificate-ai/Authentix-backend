@@ -233,15 +233,15 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
    * POST /api/v1/auth/bootstrap
    * Bootstrap user after email verification
    * Creates organization, membership, and trial (idempotent)
-   * Requires valid JWT
+   * Requires valid JWT (but NOT organization membership - that's what we're creating)
    */
   app.post(
     '/auth/bootstrap',
     {
       preHandler: async (request: FastifyRequest, reply: FastifyReply) => {
-        // Import auth middleware inline
-        const { authMiddleware } = await import('../../lib/auth/middleware.js');
-        await authMiddleware(request, reply);
+        // Use JWT-only auth (no membership required, since we're creating it)
+        const { jwtOnlyAuthMiddleware } = await import('../../lib/auth/middleware.js');
+        await jwtOnlyAuthMiddleware(request, reply);
       },
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
@@ -251,15 +251,25 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           return;
         }
 
+        const userId = request.auth.userId;
+        request.log.info({ userId }, 'Bootstrap request received');
+
         const service = new AuthService();
-        const result = await service.bootstrap(request.auth.userId);
+        const result = await service.bootstrap(userId);
+
+        request.log.info({
+          userId,
+          organizationId: result.organization?.id,
+          membershipId: result.membership?.id,
+        }, 'Bootstrap completed successfully');
 
         sendSuccess(reply, result, 201);
       } catch (error) {
         if (error instanceof ValidationError) {
+          request.log.warn({ userId: request.auth?.userId, error: error.message }, 'Bootstrap validation error');
           sendError(reply, 'VALIDATION_ERROR', error.message, 400);
         } else {
-          request.log.error(error, 'Failed to bootstrap user');
+          request.log.error({ userId: request.auth?.userId, error }, 'Failed to bootstrap user');
           sendError(reply, 'INTERNAL_ERROR', 'Failed to bootstrap user', 500);
         }
       }
