@@ -19,7 +19,10 @@ import { randomUUID } from 'node:crypto';
 const MIME_TO_EXTENSION: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
+  'image/webp': 'webp',
   'application/pdf': 'pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
   'text/csv': 'csv',
 };

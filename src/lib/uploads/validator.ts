@@ -20,9 +20,18 @@ export const ALLOWED_FILE_TYPES = {
   // Images
   'image/png': { extension: 'png', description: 'PNG image' },
   'image/jpeg': { extension: 'jpg', description: 'JPEG image' },
+  'image/webp': { extension: 'webp', description: 'WebP image' },
 
   // Documents
   'application/pdf': { extension: 'pdf', description: 'PDF document' },
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': {
+    extension: 'docx',
+    description: 'Word document',
+  },
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': {
+    extension: 'pptx',
+    description: 'PowerPoint presentation',
+  },
 
   // Spreadsheets (for imports)
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': {
@@ -86,21 +95,33 @@ export async function validateFileUpload(
     };
   }
 
-  // Handle Excel/XLSX (has magic bytes)
-  if (clientMimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
-    // XLSX files are ZIP archives starting with PK
+  // Handle Office Open XML formats (XLSX, DOCX, PPTX - all ZIP archives)
+  const officeXmlTypes = [
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // XLSX
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // DOCX
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation', // PPTX
+  ];
+  
+  if (officeXmlTypes.includes(clientMimetype)) {
+    // Office XML files are ZIP archives starting with PK
     if (!buffer.slice(0, 2).equals(Buffer.from([0x50, 0x4B]))) {
       throw new ValidationError(
-        'File content does not match declared XLSX type',
+        `File content does not match declared ${clientMimetype} type`,
         { clientMimetype, detectedType: fileTypeResult?.mime ?? 'unknown' }
       );
     }
+
+    const extensionMap: Record<string, string> = {
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    };
 
     return {
       isValid: true,
       detectedType: clientMimetype,
       expectedType: clientMimetype,
-      extension: 'xlsx',
+      extension: extensionMap[clientMimetype] || 'bin',
     };
   }
 

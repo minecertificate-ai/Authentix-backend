@@ -18,9 +18,12 @@ export class ValidationError extends Error {
 }
 
 export class NotFoundError extends Error {
-  constructor(message = 'Resource not found') {
+  details?: Record<string, unknown>;
+
+  constructor(message = 'Resource not found', details?: Record<string, unknown>) {
     super(message);
     this.name = 'NotFoundError';
+    this.details = details;
   }
 }
 
@@ -32,9 +35,12 @@ export class ForbiddenError extends Error {
 }
 
 export class ConflictError extends Error {
-  constructor(message = 'Resource conflict') {
+  details?: Record<string, unknown>;
+
+  constructor(message = 'Resource conflict', details?: Record<string, unknown>) {
     super(message);
     this.name = 'ConflictError';
+    this.details = details;
   }
 }
 
@@ -139,8 +145,9 @@ export async function errorHandler(
     await reply.status(404).send({
       success: false,
       error: {
-        code: 'NOT_FOUND',
+        code: (error.details?.code as string) || 'NOT_FOUND',
         message: error.message,
+        details: error.details,
       },
       meta: {
         request_id: requestId,
@@ -169,8 +176,9 @@ export async function errorHandler(
     await reply.status(409).send({
       success: false,
       error: {
-        code: 'CONFLICT',
+        code: error.details?.code as string || 'CONFLICT',
         message: error.message,
+        details: error.details,
       },
       meta: {
         request_id: requestId,

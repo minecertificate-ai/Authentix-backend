@@ -10,7 +10,7 @@ import { authMiddleware } from '../../lib/auth/middleware.js';
 import { contextMiddleware } from '../../lib/middleware/context.js';
 import { TemplateRepository } from '../../domains/templates/repository.js';
 import { TemplateService } from '../../domains/templates/service.js';
-import { createTemplateSchema, updateTemplateSchema } from '../../domains/templates/types.js';
+import { createTemplateSchema, updateTemplateSchema, updateFieldsSchema } from '../../domains/templates/types.js';
 import { parsePagination } from '../../lib/utils/validation.js';
 import { sendSuccess, sendPaginated, sendError } from '../../lib/utils/response.js';
 import { getSupabaseClient } from '../../lib/supabase/client.js';
@@ -107,7 +107,14 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
 
   /**
    * POST /api/v1/templates
-   * Create new template
+   * Create new template using new schema (certificate_templates, certificate_template_versions, files)
+   * 
+   * Request: multipart/form-data
+   *   - file: template source file (pdf/docx/pptx/png/jpg/webp)
+   *   - title: string (required)
+   *   - category_id: uuid (required)
+   *   - subcategory_id: uuid (required)
+   * 
    * Rate limited to prevent abuse (10 uploads per hour)
    */
   app.post(
@@ -118,6 +125,16 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       },
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
+      const startTime = Date.now();
+      const organizationId = request.context!.organizationId;
+      const userId = request.context!.userId;
+
+      if (!organizationId) {
+        request.log.warn({ userId }, '[POST /templates] Organization ID missing from auth context');
+        sendError(reply, 'BAD_REQUEST', 'Organization ID is required', 400);
+        return;
+      }
+
       try {
         // Parse multipart form data
         const data = await request.file();
@@ -127,23 +144,46 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           return;
         }
 
-        // Parse JSON metadata from form field
-        let metadata: unknown;
-        const metadataField = data.fields?.metadata;
-        
-        if (metadataField && 'value' in metadataField) {
-          metadata = JSON.parse(metadataField.value as string);
-        } else {
-          // Try to get from request body if not in multipart
-          metadata = request.body as unknown;
-        }
+        // Parse form fields
+        const titleField = data.fields?.title;
+        const categoryIdField = data.fields?.category_id;
+        const subcategoryIdField = data.fields?.subcategory_id;
 
-        if (!metadata) {
-          sendError(reply, 'VALIDATION_ERROR', 'Template metadata is required', 400);
+        if (!titleField || !('value' in titleField) || !titleField.value) {
+          sendError(reply, 'VALIDATION_ERROR', 'Title is required', 400);
           return;
         }
 
-        const dto = createTemplateSchema.parse(metadata);
+        if (!categoryIdField || !('value' in categoryIdField) || !categoryIdField.value) {
+          sendError(reply, 'VALIDATION_ERROR', 'Category ID is required', 400);
+          return;
+        }
+
+        if (!subcategoryIdField || !('value' in subcategoryIdField) || !subcategoryIdField.value) {
+          sendError(reply, 'VALIDATION_ERROR', 'Subcategory ID is required', 400);
+          return;
+        }
+
+        const title = String(titleField.value).trim();
+        const categoryId = String(categoryIdField.value).trim();
+        const subcategoryId = String(subcategoryIdField.value).trim();
+
+        // Validate title length
+        if (title.length === 0 || title.length > 255) {
+          sendError(reply, 'VALIDATION_ERROR', 'Title must be between 1 and 255 characters', 400);
+          return;
+        }
+
+        // Validate UUIDs
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(categoryId)) {
+          sendError(reply, 'VALIDATION_ERROR', 'Invalid category ID format', 400);
+          return;
+        }
+        if (!uuidRegex.test(subcategoryId)) {
+          sendError(reply, 'VALIDATION_ERROR', 'Invalid subcategory ID format', 400);
+          return;
+        }
 
         // Read file buffer
         const buffer = await data.toBuffer();
@@ -151,10 +191,14 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        const template = await service.create(
-          request.context!.organizationId,
-          request.context!.userId,
-          dto,
+        const result = await service.createWithNewSchema(
+          organizationId,
+          userId,
+          {
+            title,
+            category_id: categoryId,
+            subcategory_id: subcategoryId,
+          },
           {
             buffer,
             mimetype: data.mimetype ?? 'application/octet-stream',
@@ -162,15 +206,43 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           }
         );
 
-        sendSuccess(reply, template, 201);
+        const duration = Date.now() - startTime;
+
+        // Log success
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: result.template.id,
+          version_id: result.version.id,
+          storage_path: result.version.source_file.path,
+          duration_ms: duration,
+        }, '[POST /templates] Template created successfully');
+
+        sendSuccess(reply, result, 201);
       } catch (error) {
+        const duration = Date.now() - startTime;
+
         if (error instanceof ValidationError) {
-          sendError(reply, 'VALIDATION_ERROR', error.message, 400, error.details);
-        } else if (error instanceof Error && error.name === 'ZodError') {
-          sendError(reply, 'VALIDATION_ERROR', 'Invalid request data', 400);
+          const errorCode = (error.details?.code as string) || 'VALIDATION_ERROR';
+          request.log.warn({
+            userId,
+            organizationId,
+            error: error.message,
+            error_code: errorCode,
+            duration_ms: duration,
+          }, '[POST /templates] Validation error');
+
+          sendError(reply, errorCode, error.message, 400, error.details);
         } else {
-          request.log.error(error, 'Failed to create template');
-          sendError(reply, 'INTERNAL_ERROR', 'Failed to create template', 500);
+          const errorMessage = error instanceof Error ? error.message : 'Failed to create template';
+          request.log.error({
+            userId,
+            organizationId,
+            error: errorMessage,
+            duration_ms: duration,
+          }, '[POST /templates] Failed to create template');
+
+          sendError(reply, 'INTERNAL_ERROR', errorMessage, 500);
         }
       }
     }
@@ -279,6 +351,243 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       } catch (error) {
         request.log.error(error, 'Failed to get categories');
         sendError(reply, 'INTERNAL_ERROR', 'Failed to get categories', 500);
+      }
+    }
+  );
+
+  /**
+   * GET /api/v1/templates/:templateId/editor
+   * Get template editor data (template + version + files + fields)
+   * Returns everything editor needs in one response
+   */
+  app.get(
+    '/templates/:templateId/editor',
+    async (request: FastifyRequest<{ Params: { templateId: string } }>, reply: FastifyReply) => {
+      const organizationId = request.context!.organizationId;
+      const userId = request.context!.userId;
+      const templateId = request.params.templateId;
+
+      if (!organizationId) {
+        request.log.warn({ userId }, '[GET /templates/:templateId/editor] Organization ID missing from auth context');
+        sendError(reply, 'BAD_REQUEST', 'Organization ID is required', 400);
+        return;
+      }
+
+      try {
+        const repository = new TemplateRepository(getSupabaseClient());
+        const service = new TemplateService(repository);
+
+        const result = await service.getTemplateForEditor(templateId, organizationId);
+
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          version_id: result.latest_version.id,
+          fields_count: result.fields.length,
+        }, '[GET /templates/:templateId/editor] Successfully fetched template editor data');
+
+        sendSuccess(reply, result);
+      } catch (error) {
+        if (error instanceof NotFoundError) {
+          request.log.warn({
+            userId,
+            organizationId,
+            template_id: templateId,
+          }, '[GET /templates/:templateId/editor] Template not found');
+
+          sendError(reply, 'NOT_FOUND', error.message, 404);
+        } else {
+          const errorMessage = error instanceof Error ? error.message : 'Failed to get template editor data';
+          request.log.error({
+            userId,
+            organizationId,
+            template_id: templateId,
+            error: errorMessage,
+          }, '[GET /templates/:templateId/editor] Failed to get template editor data');
+
+          sendError(reply, 'INTERNAL_ERROR', errorMessage, 500);
+        }
+      }
+    }
+  );
+
+  /**
+   * PUT /api/v1/templates/:templateId/versions/:versionId/fields
+   * Update fields for a template version (replace semantics)
+   * Deletes existing fields and inserts new ones atomically
+   */
+  app.put(
+    '/templates/:templateId/versions/:versionId/fields',
+    async (
+      request: FastifyRequest<{
+        Params: { templateId: string; versionId: string };
+        Body: unknown;
+      }>,
+      reply: FastifyReply
+    ) => {
+      const organizationId = request.context!.organizationId;
+      const userId = request.context!.userId;
+      const templateId = request.params.templateId;
+      const versionId = request.params.versionId;
+
+      if (!organizationId) {
+        request.log.warn({ userId }, '[PUT /templates/:templateId/versions/:versionId/fields] Organization ID missing from auth context');
+        sendError(reply, 'BAD_REQUEST', 'Organization ID is required', 400);
+        return;
+      }
+
+      try {
+        // Parse and validate request body
+        const dto = updateFieldsSchema.parse(request.body);
+
+        const repository = new TemplateRepository(getSupabaseClient());
+        const service = new TemplateService(repository);
+
+        const result = await service.updateFields(templateId, versionId, organizationId, dto);
+
+        // Create audit log
+        try {
+          const supabase = getSupabaseClient();
+          await supabase.from('app_audit_logs').insert({
+            organization_id: organizationId,
+            actor_user_id: userId,
+            action: 'template.fields_updated',
+            entity_type: 'certificate_template_version',
+            entity_id: versionId,
+            metadata: {
+              template_id: templateId,
+              version_id: versionId,
+              fields_count: result.fields_count,
+            },
+          } as any);
+        } catch (auditError) {
+          // Audit log failures are non-fatal
+          request.log.warn({ error: auditError }, '[PUT /templates/:templateId/versions/:versionId/fields] Failed to create audit log');
+        }
+
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          version_id: versionId,
+          fields_count: result.fields_count,
+        }, '[PUT /templates/:templateId/versions/:versionId/fields] Successfully updated fields');
+
+        sendSuccess(reply, result);
+      } catch (error) {
+        if (error instanceof NotFoundError) {
+          request.log.warn({
+            userId,
+            organizationId,
+            template_id: templateId,
+            version_id: versionId,
+          }, '[PUT /templates/:templateId/versions/:versionId/fields] Template or version not found');
+
+          sendError(reply, 'NOT_FOUND', error.message, 404);
+        } else if (error instanceof ValidationError) {
+          const field = (error.details?.field as string) || 'unknown';
+          request.log.warn({
+            userId,
+            organizationId,
+            template_id: templateId,
+            version_id: versionId,
+            field,
+            error: error.message,
+          }, '[PUT /templates/:templateId/versions/:versionId/fields] Validation error');
+
+          sendError(reply, 'VALIDATION_ERROR', error.message, 400, {
+            ...error.details,
+            field,
+          });
+        } else if (error instanceof Error && error.name === 'ZodError') {
+          request.log.warn({
+            userId,
+            organizationId,
+            template_id: templateId,
+            version_id: versionId,
+            error: error.message,
+          }, '[PUT /templates/:templateId/versions/:versionId/fields] Schema validation error');
+
+          sendError(reply, 'VALIDATION_ERROR', 'Invalid request data', 400);
+        } else {
+          const errorMessage = error instanceof Error ? error.message : 'Failed to update fields';
+          request.log.error({
+            userId,
+            organizationId,
+            template_id: templateId,
+            version_id: versionId,
+            error: errorMessage,
+          }, '[PUT /templates/:templateId/versions/:versionId/fields] Failed to update fields');
+
+          sendError(reply, 'INTERNAL_ERROR', errorMessage, 500);
+        }
+      }
+    }
+  );
+
+  /**
+   * POST /api/v1/templates/:templateId/versions/:versionId/preview
+   * Generate preview for a template version
+   * Idempotent: returns existing preview if already generated
+   */
+  app.post(
+    '/templates/:templateId/versions/:versionId/preview',
+    async (
+      request: FastifyRequest<{
+        Params: { templateId: string; versionId: string };
+      }>,
+      reply: FastifyReply
+    ) => {
+      const organizationId = request.context!.organizationId;
+      const userId = request.context!.userId;
+      const templateId = request.params.templateId;
+      const versionId = request.params.versionId;
+
+      if (!organizationId) {
+        request.log.warn({ userId }, '[POST /templates/:templateId/versions/:versionId/preview] Organization ID missing from auth context');
+        sendError(reply, 'BAD_REQUEST', 'Organization ID is required', 400);
+        return;
+      }
+
+      try {
+        const repository = new TemplateRepository(getSupabaseClient());
+        const service = new TemplateService(repository);
+
+        const result = await service.generatePreview(templateId, versionId, organizationId, userId);
+
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          version_id: versionId,
+          status: result.status,
+          preview_file_id: result.preview_file_id,
+        }, '[POST /templates/:templateId/versions/:versionId/preview] Preview generation completed');
+
+        sendSuccess(reply, result);
+      } catch (error) {
+        if (error instanceof NotFoundError) {
+          request.log.warn({
+            userId,
+            organizationId,
+            template_id: templateId,
+            version_id: versionId,
+          }, '[POST /templates/:templateId/versions/:versionId/preview] Template or version not found');
+
+          sendError(reply, 'NOT_FOUND', error.message, 404);
+        } else {
+          const errorMessage = error instanceof Error ? error.message : 'Failed to generate preview';
+          request.log.error({
+            userId,
+            organizationId,
+            template_id: templateId,
+            version_id: versionId,
+            error: errorMessage,
+          }, '[POST /templates/:templateId/versions/:versionId/preview] Failed to generate preview');
+
+          sendError(reply, 'INTERNAL_ERROR', errorMessage, 500);
+        }
       }
     }
   );

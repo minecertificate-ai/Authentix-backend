@@ -15,6 +15,7 @@ import { registerDashboardRoutes } from './dashboard.js';
 import { registerOrganizationRoutes } from './organizations.js';
 import { registerUserRoutes } from './users.js';
 import { registerAuthRoutes } from './auth.js';
+import { registerCatalogRoutes } from './catalog.js';
 
 export async function registerV1Routes(app: FastifyInstance): Promise<void> {
   // Register auth routes (no auth middleware)
@@ -30,4 +31,5 @@ export async function registerV1Routes(app: FastifyInstance): Promise<void> {
   await app.register(registerDashboardRoutes);
   await app.register(registerOrganizationRoutes);
   await app.register(registerUserRoutes);
+  await app.register(registerCatalogRoutes);
 }

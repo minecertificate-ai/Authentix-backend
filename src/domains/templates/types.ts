@@ -94,3 +94,74 @@ export interface TemplateEntity {
   updated_at: string;
   deleted_at: string | null;
 }
+
+/**
+ * Template field DTO for new schema (certificate_template_fields)
+ */
+export const templateFieldDTOSchema = z.object({
+  field_key: z.string().min(2).max(64).regex(/^[a-z0-9_]+$/, 'field_key must be lowercase alphanumeric with underscores only'),
+  label: z.string().min(2).max(80),
+  type: z.enum(['text', 'date', 'qrcode', 'custom']),
+  page_number: z.number().int().positive(),
+  x: z.number().min(0),
+  y: z.number().min(0),
+  width: z.number().positive().optional(),
+  height: z.number().positive().optional(),
+  style: z.record(z.unknown()).optional(),
+  required: z.boolean().default(false),
+});
+
+export type TemplateFieldDTO = z.infer<typeof templateFieldDTOSchema>;
+
+/**
+ * Update fields request schema
+ */
+export const updateFieldsSchema = z.object({
+  fields: z.array(templateFieldDTOSchema).max(200, 'Maximum 200 fields allowed'),
+});
+
+export type UpdateFieldsDTO = z.infer<typeof updateFieldsSchema>;
+
+/**
+ * Template editor data (template + version + files + fields)
+ */
+export interface TemplateEditorData {
+  template: {
+    id: string;
+    title: string;
+    status: string;
+    category_id: string;
+    subcategory_id: string;
+    created_at: string;
+  };
+  latest_version: {
+    id: string;
+    version_number: number;
+    page_count: number;
+    normalized_pages: Record<string, unknown> | null;
+  };
+  source_file: {
+    id: string;
+    bucket: string;
+    path: string;
+    mime_type: string;
+  };
+  preview_file: {
+    id: string;
+    bucket: string;
+    path: string;
+  } | null;
+  fields: Array<{
+    id: string;
+    field_key: string;
+    label: string;
+    type: string;
+    page_number: number;
+    x: number;
+    y: number;
+    width: number | null;
+    height: number | null;
+    style: Record<string, unknown> | null;
+    required: boolean;
+  }>;
+}
