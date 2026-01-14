@@ -252,13 +252,15 @@ export class AuthService {
         .maybeSingle();
 
       if (profileCheckError && profileCheckError.code !== 'PGRST116') {
-        console.error(
-          `[Bootstrap] Error checking profile for user_id=${userId}: ${profileCheckError.message}`,
-          profileCheckError
-        );
-        throw new Error(
-          `[Bootstrap Step: Profile Check] Failed to check profile: ${profileCheckError.message}`
-        );
+        // PGRST116 = no rows found (expected if profile doesn't exist)
+        const errorMessage = `[Bootstrap Step: Profile Check] Failed to check profile: ${profileCheckError.message}`;
+        console.error(errorMessage, {
+          step: 'profile_check',
+          userId,
+          error_code: profileCheckError.code,
+          error_details: profileCheckError.details,
+        });
+        throw new Error(`${errorMessage} (PostgREST code: ${profileCheckError.code || 'unknown'})`);
       }
 
       if (existingProfile) {
@@ -279,13 +281,13 @@ export class AuthService {
       } = await supabase.auth.admin.getUserById(userId);
 
       if (authUserForProfileError) {
-        console.error(
-          `[Bootstrap Step: Profile Creation] Error fetching auth user for profile creation: ${authUserForProfileError.message}`,
-          authUserForProfileError
-        );
-        throw new Error(
-          `[Bootstrap Step: Profile Creation] Failed to fetch auth user: ${authUserForProfileError.message}`
-        );
+        const errorMessage = `[Bootstrap Step: Profile Creation] Failed to fetch auth user: ${authUserForProfileError.message}`;
+        console.error(errorMessage, {
+          step: 'fetch_auth_user_for_profile',
+          userId,
+          error_code: authUserForProfileError.status || 'unknown',
+        });
+        throw new Error(errorMessage);
       }
 
       if (!authUserForProfile) {
@@ -311,13 +313,15 @@ export class AuthService {
         .single();
 
       if (profileInsertError) {
-        console.error(
-          `[Bootstrap Step: Profile Creation] Error creating profile for user_id=${userId}: ${profileInsertError.message}`,
-          profileInsertError
-        );
-        throw new Error(
-          `[Bootstrap Step: Profile Creation] Failed to create profile: ${profileInsertError.message}`
-        );
+        const errorMessage = `[Bootstrap Step: Profile Creation] Failed to create profile: ${profileInsertError.message}`;
+        console.error(errorMessage, {
+          step: 'profile_creation',
+          userId,
+          error_code: profileInsertError.code,
+          error_details: profileInsertError.details,
+          error_hint: profileInsertError.hint,
+        });
+        throw new Error(`${errorMessage} (PostgREST code: ${profileInsertError.code || 'unknown'})`);
       }
 
       console.log(
@@ -354,14 +358,16 @@ export class AuthService {
       .is('deleted_at', null)
       .maybeSingle();
 
-    if (membershipCheckError) {
-      console.error(
-        `[Bootstrap Step: Lookup Membership] Error checking membership: ${membershipCheckError.message}`,
-        membershipCheckError
-      );
-      throw new Error(
-        `[Bootstrap Step: Lookup Membership] Failed to check existing membership: ${membershipCheckError.message}`
-      );
+    if (membershipCheckError && membershipCheckError.code !== 'PGRST116') {
+      // PGRST116 = no rows found (expected if user has no membership)
+      const errorMessage = `[Bootstrap Step: Lookup Membership] Failed to check existing membership: ${membershipCheckError.message}`;
+      console.error(errorMessage, {
+        step: 'lookup_membership',
+        userId,
+        error_code: membershipCheckError.code,
+        error_details: membershipCheckError.details,
+      });
+      throw new Error(`${errorMessage} (PostgREST code: ${membershipCheckError.code || 'unknown'})`);
     }
 
     if (existingMembership) {
@@ -395,12 +401,18 @@ export class AuthService {
     // Get user metadata from auth
     const { data: { user: authUser }, error: authUserError } = await supabase.auth.admin.getUserById(userId);
     if (authUserError) {
-      console.error(`[Bootstrap] Error fetching auth user: ${authUserError.message}`, authUserError);
-      throw new ValidationError(`Failed to fetch user: ${authUserError.message}`);
+      const errorMessage = `[Bootstrap Step: Fetch Auth User] Failed to fetch auth user: ${authUserError.message}`;
+      console.error(errorMessage, {
+        step: 'fetch_auth_user',
+        userId,
+        error_code: authUserError.status || 'unknown',
+      });
+      throw new ValidationError(errorMessage);
     }
     if (!authUser) {
-      console.error(`[Bootstrap] User not found in auth.users: ${userId}`);
-      throw new ValidationError('User not found');
+      const errorMessage = `[Bootstrap Step: Fetch Auth User] User not found in auth.users: ${userId}`;
+      console.error(errorMessage, { step: 'fetch_auth_user', userId });
+      throw new ValidationError(errorMessage);
     }
 
     console.log(`[Bootstrap] Auth user found: ${authUser.email}, verified: ${!!authUser.email_confirmed_at}`);
@@ -605,8 +617,16 @@ export class AuthService {
         .maybeSingle();
 
       if (roleCheckError && roleCheckError.code !== 'PGRST116') {
-        console.error(`[Bootstrap Step: Roles Seed] Error checking role ${roleKey}: ${roleCheckError.message}`, roleCheckError);
-        throw new Error(`[Bootstrap Step: Roles Seed] Failed to check existing role ${roleKey}: ${roleCheckError.message}`);
+        // PGRST116 = no rows found (expected if role doesn't exist)
+        const errorMessage = `[Bootstrap Step: Roles Seed] Failed to check existing role ${roleKey}: ${roleCheckError.message}`;
+        console.error(errorMessage, {
+          step: 'roles_seed_check',
+          role_key: roleKey,
+          organization_id: (newOrg as any).id,
+          error_code: roleCheckError.code,
+          error_details: roleCheckError.details,
+        });
+        throw new Error(`${errorMessage} (PostgREST code: ${roleCheckError.code || 'unknown'})`);
       }
 
       if (!existingRole) {
@@ -618,8 +638,16 @@ export class AuthService {
         } as any);
 
         if (roleInsertError) {
-          console.error(`[Bootstrap Step: Roles Seed] Error creating role ${roleKey}: ${roleInsertError.message}`, roleInsertError);
-          throw new Error(`[Bootstrap Step: Roles Seed] Failed to create role ${roleKey}: ${roleInsertError.message}`);
+          const errorMessage = `[Bootstrap Step: Roles Seed] Failed to create role ${roleKey}: ${roleInsertError.message}`;
+          console.error(errorMessage, {
+            step: 'roles_seed_create',
+            role_key: roleKey,
+            organization_id: (newOrg as any).id,
+            error_code: roleInsertError.code,
+            error_details: roleInsertError.details,
+            error_hint: roleInsertError.hint,
+          });
+          throw new Error(`${errorMessage} (PostgREST code: ${roleInsertError.code || 'unknown'})`);
         } else {
           console.log(`[Bootstrap Step: Roles Seed] Created role: ${roleKey}`);
         }
@@ -637,12 +665,19 @@ export class AuthService {
       .single();
 
     if (ownerRoleError) {
-      console.error(`[Bootstrap] Error fetching owner role: ${ownerRoleError.message}`, ownerRoleError);
-      throw new Error(`[Bootstrap Step: Role Lookup] Failed to find owner role: ${ownerRoleError.message}`);
+      const errorMessage = `[Bootstrap Step: Role Lookup] Failed to find owner role: ${ownerRoleError.message}`;
+      console.error(errorMessage, {
+        step: 'role_lookup_owner',
+        organization_id: (newOrg as any).id,
+        error_code: ownerRoleError.code,
+        error_details: ownerRoleError.details,
+      });
+      throw new Error(`${errorMessage} (PostgREST code: ${ownerRoleError.code || 'unknown'})`);
     }
     if (!ownerRole) {
-      console.error(`[Bootstrap] Owner role not found after creation`);
-      throw new Error('[Bootstrap Step: Role Lookup] Failed to find owner role after creation');
+      const errorMessage = `[Bootstrap Step: Role Lookup] Owner role not found after creation for org_id=${(newOrg as any).id}`;
+      console.error(errorMessage, { step: 'role_lookup_owner', organization_id: (newOrg as any).id });
+      throw new Error(errorMessage);
     }
 
     console.log(`[Bootstrap] Owner role found: role_id=${(ownerRole as any).id}`);
@@ -685,13 +720,27 @@ export class AuthService {
       .single();
 
     if (memberError) {
-      console.error(`[Bootstrap] Error creating membership: ${memberError.message}`, memberError);
-      console.error(`[Bootstrap] Error details:`, JSON.stringify(memberError, null, 2));
-      throw new Error(`[Bootstrap Step: Membership Creation] Failed to create membership: ${memberError.message}`);
+      const errorMessage = `[Bootstrap Step: Membership Creation] Failed to create membership: ${memberError.message}`;
+      console.error(errorMessage, {
+        step: 'membership_creation',
+        userId,
+        organization_id: (newOrg as any).id,
+        role_id: (ownerRole as any).id,
+        username,
+        error_code: memberError.code,
+        error_details: memberError.details,
+        error_hint: memberError.hint,
+      });
+      throw new Error(`${errorMessage} (PostgREST code: ${memberError.code || 'unknown'})`);
     }
     if (!newMembership) {
-      console.error(`[Bootstrap] Membership insert returned no data`);
-      throw new Error('[Bootstrap Step: Membership Creation] Failed to create membership: No data returned from insert');
+      const errorMessage = `[Bootstrap Step: Membership Creation] Membership insert returned no data for user_id=${userId}, org_id=${(newOrg as any).id}`;
+      console.error(errorMessage, {
+        step: 'membership_creation',
+        userId,
+        organization_id: (newOrg as any).id,
+      });
+      throw new Error(errorMessage);
     }
 
     console.log(`[Bootstrap] Membership created successfully: membership_id=${(newMembership as any).id}`);

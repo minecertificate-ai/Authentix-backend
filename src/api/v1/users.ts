@@ -28,17 +28,18 @@ export async function registerUserRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/users/me',
     async (request: FastifyRequest, reply: FastifyReply) => {
+      const userId = request.context!.userId;
+      
       try {
         const repository = new UserRepository(getSupabaseClient());
         const service = new UserService(repository);
 
-        const userId = request.context!.userId;
         const profile = await service.getProfile(userId);
 
         if (!profile) {
           // Profile missing - controlled, non-500 error for dashboard bootstrap flows
-          const message = `[Profile Fetch] profile missing for user_id=${userId}`;
-          request.log.warn({ userId }, message);
+          const message = `[GET /users/me] Profile missing for user_id=${userId}`;
+          request.log.warn({ userId, step: 'profile_fetch' }, message);
 
           sendError(
             reply,
@@ -47,6 +48,17 @@ export async function registerUserRoutes(app: FastifyInstance): Promise<void> {
             409
           );
           return;
+        }
+
+        // If profile exists but no organization membership, return 200 with null organization
+        // Frontend can use this to trigger bootstrap
+        if (!profile.organization || !profile.membership) {
+          request.log.info({ 
+            userId, 
+            step: 'membership_check',
+            has_org: !!profile.organization,
+            has_membership: !!profile.membership 
+          }, 'Profile exists but no organization membership');
         }
 
         // Contract for dashboard:
@@ -68,9 +80,28 @@ export async function registerUserRoutes(app: FastifyInstance): Promise<void> {
         };
 
         sendSuccess(reply, responseBody);
-      } catch (error) {
-        request.log.error(error, 'Failed to get user profile');
-        sendError(reply, 'INTERNAL_ERROR', 'Failed to get user profile', 500);
+      } catch (error: any) {
+        // Extract PostgREST error details if available
+        const errorMessage = error?.message || 'Failed to get user profile';
+        const errorCode = error?.code || 'unknown';
+        const step = error?.step || 'unknown';
+        
+        request.log.error({ 
+          userId, 
+          step,
+          error_code: errorCode,
+          error_message: errorMessage,
+          error_details: error?.details 
+        }, `[GET /users/me] Failed to get user profile: ${errorMessage}`);
+        
+        // Only return 500 for real unexpected errors
+        // Schema mismatches should be fixed in code, not returned as 500
+        sendError(
+          reply, 
+          'INTERNAL_ERROR', 
+          `Failed to get user profile: ${errorMessage}`, 
+          500
+        );
       }
     }
   );

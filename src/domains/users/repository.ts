@@ -12,6 +12,8 @@ export class UserRepository {
 
   /**
    * Get user profile with organization info
+   * Consolidates queries to avoid N+1: single query with joins for membership + org + role
+   * Handles missing optional fields gracefully (logo, etc.)
    */
   async getProfile(userId: string): Promise<UserProfile | null> {
     // Get profile
@@ -22,14 +24,15 @@ export class UserRepository {
       .maybeSingle();
 
     if (profileError) {
-      throw new Error(`Failed to get user profile: ${profileError.message}`);
+      throw new Error(`[UserRepository.getProfile] Failed to get user profile: ${profileError.message} (PostgREST code: ${profileError.code || 'unknown'})`);
     }
 
     if (!profile) {
       return null;
     }
 
-    // Get active organization membership (with organization info)
+    // Get active organization membership with organization and role info in a single query
+    // Use explicit column selection to avoid schema mismatches
     const { data: membership, error: memberError } = await this.supabase
       .from('organization_members')
       .select(`
@@ -38,7 +41,7 @@ export class UserRepository {
         username,
         role_id,
         status,
-        organizations:organization_id (
+        organizations!inner (
           id,
           name,
           slug,
@@ -47,7 +50,7 @@ export class UserRepository {
           industry_id,
           logo_file_id
         ),
-        organization_roles:role_id (
+        organization_roles (
           id,
           key
         )
@@ -57,21 +60,54 @@ export class UserRepository {
       .is('deleted_at', null)
       .maybeSingle();
 
+    // PGRST116 = no rows found (expected if user has no membership)
     if (memberError && memberError.code !== 'PGRST116') {
-      throw new Error(`Failed to get organization membership: ${memberError.message}`);
+      throw new Error(`[UserRepository.getProfile] Failed to get organization membership: ${memberError.message} (PostgREST code: ${memberError.code || 'unknown'})`);
     }
 
-    // Fetch logo file separately if logo_file_id exists (PostgREST nested joins can be unreliable)
+    // If no membership, return profile without organization
+    if (!membership) {
+      const fullName = profile.first_name && profile.last_name
+        ? `${profile.first_name} ${profile.last_name}`.trim()
+        : profile.first_name || profile.last_name || null;
+
+      return {
+        id: profile.id,
+        email: profile.email,
+        first_name: profile.first_name,
+        last_name: profile.last_name,
+        full_name: fullName,
+        organization: null,
+        membership: null,
+      };
+    }
+
+    // Safely extract nested organization data
+    const orgData = (membership as any).organizations;
+    const roleData = (membership as any).organization_roles;
+
+    if (!orgData) {
+      // This should not happen with !inner, but handle gracefully
+      throw new Error(`[UserRepository.getProfile] Organization data missing for membership_id=${membership.id}`);
+    }
+
+    // Fetch logo file separately if logo_file_id exists
+    // This avoids N+1 by only fetching when needed (logo is optional)
     let logoFile: { id: string; bucket: string; path: string } | null = null;
-    if (membership && (membership as any).organizations?.logo_file_id) {
-      const logoFileId = (membership as any).organizations.logo_file_id;
+    if (orgData.logo_file_id) {
       const { data: file, error: fileError } = await this.supabase
         .from('files')
         .select('id, bucket, path')
-        .eq('id', logoFileId)
+        .eq('id', orgData.logo_file_id)
         .maybeSingle();
 
-      if (!fileError && file) {
+      // Logo fetch errors are non-fatal - just log and continue
+      if (fileError) {
+        console.warn(`[UserRepository.getProfile] Failed to fetch logo file (non-fatal): ${fileError.message}`, {
+          logo_file_id: orgData.logo_file_id,
+          error_code: fileError.code,
+        });
+      } else if (file) {
         logoFile = {
           id: file.id,
           bucket: file.bucket,
@@ -90,33 +126,29 @@ export class UserRepository {
       first_name: profile.first_name,
       last_name: profile.last_name,
       full_name: fullName,
-      organization: membership
-        ? {
-            id: (membership as any).organizations.id,
-            name: (membership as any).organizations.name,
-            slug: (membership as any).organizations.slug,
-            application_id: (membership as any).organizations.application_id,
-            billing_status: (membership as any).organizations.billing_status,
-            industry_id: (membership as any).organizations.industry_id,
-            logo: logoFile
-              ? {
-                  file_id: logoFile.id,
-                  bucket: logoFile.bucket,
-                  path: logoFile.path,
-                }
-              : null,
-          }
-        : null,
-      membership: membership
-        ? {
-            id: membership.id,
-            organization_id: membership.organization_id,
-            username: membership.username,
-            role_id: membership.role_id,
-            role_key: (membership as any).organization_roles?.key || 'member',
-            status: membership.status,
-          }
-        : null,
+      organization: {
+        id: orgData.id,
+        name: orgData.name,
+        slug: orgData.slug,
+        application_id: orgData.application_id,
+        billing_status: orgData.billing_status,
+        industry_id: orgData.industry_id || null,
+        logo: logoFile
+          ? {
+              file_id: logoFile.id,
+              bucket: logoFile.bucket,
+              path: logoFile.path,
+            }
+          : null,
+      },
+      membership: {
+        id: membership.id,
+        organization_id: membership.organization_id,
+        username: membership.username,
+        role_id: membership.role_id,
+        role_key: roleData?.key || 'member',
+        status: membership.status,
+      },
     };
   }
 }
