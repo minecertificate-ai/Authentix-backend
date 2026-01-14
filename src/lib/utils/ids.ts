@@ -81,3 +81,29 @@ export function validateApplicationId(applicationId: string): boolean {
 export function validateAPIKey(apiKey: string): boolean {
   return /^xen_(prod|test)_live_[A-Za-z0-9_-]+$/.test(apiKey);
 }
+
+/**
+ * Generate a random slug for organizations
+ * 
+ * Requirements:
+ * - Exactly 20 characters
+ * - Only lowercase letters [a-z]
+ * - No digits, no separators, no prefix/suffix
+ * 
+ * @returns 20-character lowercase string
+ */
+export function generateOrganizationSlug(): string {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz';
+  const length = 20;
+  let slug = '';
+  
+  // Use crypto.randomBytes for secure randomness
+  const bytes = randomBytes(length);
+  
+  for (let i = 0; i < length; i++) {
+    // Map byte value (0-255) to alphabet index (0-25)
+    slug += alphabet[bytes[i] % alphabet.length];
+  }
+  
+  return slug;
+}

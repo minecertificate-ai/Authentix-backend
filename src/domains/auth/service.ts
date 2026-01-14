@@ -356,18 +356,16 @@ export class AuthService {
     }
 
     // Generate unique slug for organization
-    const baseSlugRaw = companyName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
+    // Slug must be exactly 20 characters, only lowercase letters [a-z]
+    // Never accept slug from frontend - always generate server-side
+    const { generateOrganizationSlug, generateApplicationId, generateAPIKey, hashAPIKey } = await import('../../lib/utils/ids.js');
+    
+    let slug = generateOrganizationSlug();
+    let slugAttempts = 0;
+    const maxSlugAttempts = 10; // Check up to 10 slugs before giving up
 
-    // Fallback to a non-empty base slug
-    const baseSlug = baseSlugRaw || 'org';
-
-    let slug = `${baseSlug}-${crypto.randomBytes(3).toString('hex')}`;
-    let suffix = 1;
-
-    while (true) {
+    // Check for slug uniqueness (pre-check before insert)
+    while (slugAttempts < maxSlugAttempts) {
       const { data: existing, error: slugCheckError } = await supabase
         .from('organizations')
         .select('id')
@@ -375,19 +373,25 @@ export class AuthService {
         .maybeSingle();
 
       if (slugCheckError && slugCheckError.code !== 'PGRST116') {
-        console.error(`[Bootstrap] Error checking slug: ${slugCheckError.message}`, slugCheckError);
+        console.error(`[Bootstrap Step: Slug Generation] Error checking slug: ${slugCheckError.message}`, slugCheckError);
       }
 
-      if (!existing) break;
-      slug = `${baseSlug}-${crypto.randomBytes(2).toString('hex')}-${suffix++}`;
+      if (!existing) break; // Slug is available
+      
+      // Regenerate slug if collision found
+      slug = generateOrganizationSlug();
+      slugAttempts++;
     }
 
-    console.log(`[Bootstrap] Generated unique slug: ${slug}`);
+    if (slugAttempts >= maxSlugAttempts) {
+      throw new Error('[Bootstrap Step: Slug Generation] Failed to generate unique slug after multiple attempts');
+    }
+
+    console.log(`[Bootstrap Step: Slug Generation] Generated unique slug: ${slug} (${slug.length} chars, ${slugAttempts} attempts)`);
 
     // Generate unique application_id and API key
     // Note: API key is generated once and hashed with SHA-256 before storage
     // The plaintext API key is never stored (only the hash)
-    const { generateApplicationId, generateAPIKey, hashAPIKey } = await import('../../lib/utils/ids.js');
     const applicationId = generateApplicationId();
     const apiKey = generateAPIKey();
     const apiKeyHash = await hashAPIKey(apiKey);
@@ -402,10 +406,30 @@ export class AuthService {
     console.log(`[Bootstrap Step: Organization Creation] Creating organization: name="${companyName}", slug="${slug}"`);
     
     // Build insert payload with ONLY existing columns
-    // Required: name, slug, application_id, api_key_hash (NOT NULL)
+    // Required: name, slug, application_id, api_key_hash, billing_address (NOT NULL)
     // Optional: email, billing_status, trial_* fields
     // DO NOT include: api_key_created_at, api_key_last_rotated_at (columns don't exist)
     // DO NOT include: trial_start, trial_end, free_certificates_included (old column names)
+    
+    // Validate required fields before building payload
+    if (!apiKeyHash || typeof apiKeyHash !== 'string') {
+      throw new Error('[Bootstrap Step: Organization Creation] api_key_hash is required but was null/undefined');
+    }
+    if (!applicationId || typeof applicationId !== 'string') {
+      throw new Error('[Bootstrap Step: Organization Creation] application_id is required but was null/undefined');
+    }
+    if (!slug || typeof slug !== 'string' || slug.length !== 20 || !/^[a-z]{20}$/.test(slug)) {
+      throw new Error(`[Bootstrap Step: Organization Creation] slug must be exactly 20 lowercase letters, got: "${slug}"`);
+    }
+    
+    // billing_address is required (jsonb, NOT NULL)
+    // Set safe default for bootstrap (user hasn't provided billing details yet)
+    const billingAddress = {
+      source: 'bootstrap',
+      status: 'incomplete',
+      provided_at: null,
+    };
+    
     const orgInsertPayload = {
       name: companyName,
       slug,
@@ -417,47 +441,96 @@ export class AuthService {
       trial_free_certificates_limit: 10, // Explicitly set (default would be 10)
       trial_free_certificates_used: 0, // Explicitly set (default would be 0)
       api_key_hash: apiKeyHash, // REQUIRED: NOT NULL, must be set
+      billing_address: billingAddress, // REQUIRED: NOT NULL jsonb, set safe default
     };
     
-    // Validate api_key_hash is not null/undefined
-    if (!apiKeyHash || typeof apiKeyHash !== 'string') {
-      throw new Error('[Bootstrap Step: Organization Creation] api_key_hash is required but was null/undefined');
-    }
-    
     console.log(`[Bootstrap Step: Organization Creation] Insert payload keys:`, Object.keys(orgInsertPayload));
+    console.log(`[Bootstrap Step: Organization Creation] Slug validation: ${slug.length} chars, matches [a-z]{20}: ${/^[a-z]{20}$/.test(slug)}`);
     
-    // Insert organization and select all required fields
+    // Insert organization with retry logic for unique violations
     // Note: If you recently changed the database schema, ensure PostgREST schema cache is refreshed
     // Run in Supabase SQL editor: NOTIFY pgrst, 'reload schema';
     // Or restart services to refresh schema cache
-    const { data: newOrg, error: orgError } = await supabase
-      .from('organizations')
-      .insert(orgInsertPayload)
-      .select(`
-        id,
-        name,
-        slug,
-        application_id,
-        email,
-        billing_status,
-        trial_started_at,
-        trial_ends_at,
-        trial_free_certificates_limit,
-        trial_free_certificates_used,
-        api_key_hash,
-        created_at
-      `)
-      .single();
-
+    let newOrg: any = null;
+    let orgError: any = null;
+    let insertAttempts = 0;
+    const maxInsertAttempts = 5;
+    
+    while (insertAttempts < maxInsertAttempts) {
+      const result = await supabase
+        .from('organizations')
+        .insert(orgInsertPayload)
+        .select(`
+          id,
+          name,
+          slug,
+          application_id,
+          email,
+          billing_status,
+          trial_started_at,
+          trial_ends_at,
+          trial_free_certificates_limit,
+          trial_free_certificates_used,
+          api_key_hash,
+          billing_address,
+          created_at
+        `)
+        .single();
+      
+      newOrg = result.data;
+      orgError = result.error;
+      
+      // If successful, break
+      if (!orgError && newOrg) {
+        break;
+      }
+      
+      // If error is NOT a unique violation, don't retry
+      const isUniqueViolation = orgError?.code === '23505' || // PostgreSQL unique violation
+                                orgError?.message?.includes('duplicate') ||
+                                orgError?.message?.includes('unique') ||
+                                orgError?.message?.includes('violates unique constraint');
+      
+      if (!isUniqueViolation) {
+        // Not a unique violation - don't retry, throw immediately
+        break;
+      }
+      
+      // Unique violation - regenerate slug and retry
+      insertAttempts++;
+      console.warn(`[Bootstrap Step: Organization Creation] Unique violation on attempt ${insertAttempts}/${maxInsertAttempts}, regenerating slug...`);
+      console.warn(`[Bootstrap Step: Organization Creation] Error: ${orgError.message}, code: ${orgError.code}`);
+      
+      // Regenerate slug for retry
+      slug = generateOrganizationSlug();
+      orgInsertPayload.slug = slug;
+      
+      // Small delay before retry (avoid race conditions)
+      await new Promise(resolve => setTimeout(resolve, 100 * insertAttempts));
+    }
+    
+    // Check final result
     if (orgError) {
-      console.error(`[Bootstrap] Error creating organization: ${orgError.message}`, orgError);
-      console.error(`[Bootstrap] Error details:`, JSON.stringify(orgError, null, 2));
-      console.error(`[Bootstrap] Insert payload keys:`, Object.keys(orgInsertPayload));
-      throw new Error(`[Bootstrap Step: Organization Creation] Failed to create organization: ${orgError.message}`);
+      const errorDetails = {
+        message: orgError.message,
+        code: orgError.code,
+        details: orgError.details,
+        hint: orgError.hint,
+        constraint: orgError.code === '23505' ? 'unique_violation' : undefined,
+      };
+      
+      console.error(`[Bootstrap Step: Organization Creation] Error creating organization after ${insertAttempts} attempts:`, errorDetails);
+      console.error(`[Bootstrap Step: Organization Creation] Insert payload keys:`, Object.keys(orgInsertPayload));
+      console.error(`[Bootstrap Step: Organization Creation] Slug used: "${slug}" (${slug.length} chars)`);
+      
+      throw new Error(
+        `[Bootstrap Step: Organization Creation] Failed to create organization after ${insertAttempts} attempts: ${orgError.message} ` +
+        `(Postgres code: ${orgError.code}, constraint: ${errorDetails.constraint || 'unknown'})`
+      );
     }
     if (!newOrg) {
-      console.error(`[Bootstrap] Organization insert returned no data`);
-      throw new Error('[Bootstrap Step: Organization Creation] Failed to create organization: No data returned from insert');
+      console.error(`[Bootstrap Step: Organization Creation] Organization insert returned no data after ${insertAttempts} attempts`);
+      throw new Error(`[Bootstrap Step: Organization Creation] Failed to create organization: No data returned from insert after ${insertAttempts} attempts`);
     }
 
     console.log(`[Bootstrap] Organization created successfully: org_id=${(newOrg as any).id}`);

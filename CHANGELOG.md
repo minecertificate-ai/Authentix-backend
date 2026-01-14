@@ -103,3 +103,22 @@ Enables frontend polling to detect email verification even when verification lin
   - `src/domains/auth/service.ts`: Removed non-existent columns, added validation, enhanced error messages
   - `src/api/v1/auth.ts`: Added verification-status endpoint, enhanced error response structure
   - `src/lib/utils/ids.ts`: Added validation to `hashAPIKey()` to ensure it never returns null
+
+### Fixed - Slug Constraint Violation and Required Fields
+- **Root cause:** Bootstrap was generating slugs based on company name (with hyphens/numbers), violating `organizations_slug_format_chk` constraint (must be exactly 20 lowercase letters [a-z])
+- **Root cause:** `billing_address` (required jsonb NOT NULL) was not being set in insert payload
+- **Fix:**
+  - **Slug Generation:** Created `generateOrganizationSlug()` function that generates exactly 20 lowercase letters [a-z] using crypto.randomBytes
+  - **Slug Validation:** Added validation to ensure slug matches `^[a-z]{20}$` before insert
+  - **Collision Safety:** Added retry logic (up to 5 attempts) for unique violations on slug/application_id
+  - **Required Fields:** Added `billing_address` to insert payload with safe default: `{ source: 'bootstrap', status: 'incomplete', provided_at: null }`
+  - **Enhanced Error Logging:** Error messages now include Postgres error code, constraint name, and attempt count
+  - **Pre-check Uniqueness:** Check slug uniqueness before insert (up to 10 attempts) to reduce database errors
+- **Files changed:**
+  - `src/lib/utils/ids.ts`: Added `generateOrganizationSlug()` function
+  - `src/domains/auth/service.ts`: 
+    - Replaced company-name-based slug generation with `generateOrganizationSlug()`
+    - Added slug validation (20 chars, [a-z] only)
+    - Added retry logic for unique violations
+    - Added `billing_address` to insert payload
+    - Enhanced error logging with structured details
