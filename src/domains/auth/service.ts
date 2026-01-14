@@ -689,19 +689,16 @@ export class AuthService {
         });
         throw new Error(`${errorMessage} (PostgREST code: ${ownerRoleError.code || 'unknown'})`);
       }
+      
+      if (!ownerRoleData) {
+        const errorMessage = `[Bootstrap Step: Role Lookup] Owner role data not returned after fetch for org_id=${orgId}`;
+        console.error(errorMessage, { step: 'role_lookup_owner', organization_id: orgId });
+        throw new Error(errorMessage);
+      }
+      
       ownerRole = { roleKey: 'owner', existingRole: ownerRoleData };
     }
 
-    if (ownerRoleError) {
-      const errorMessage = `[Bootstrap Step: Role Lookup] Failed to find owner role: ${ownerRoleError.message}`;
-      console.error(errorMessage, {
-        step: 'role_lookup_owner',
-        organization_id: (newOrg as any).id,
-        error_code: ownerRoleError.code,
-        error_details: ownerRoleError.details,
-      });
-      throw new Error(`${errorMessage} (PostgREST code: ${ownerRoleError.code || 'unknown'})`);
-    }
     if (!ownerRole || !ownerRole.existingRole) {
       const errorMessage = `[Bootstrap Step: Role Lookup] Owner role not found after creation for org_id=${orgId}`;
       console.error(errorMessage, { step: 'role_lookup_owner', organization_id: orgId });
