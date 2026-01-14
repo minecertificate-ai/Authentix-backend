@@ -63,7 +63,7 @@ export async function authMiddleware(
   const { token, source } = extractToken(request);
 
   if (!token || !source) {
-    throw new UnauthorizedError('Missing authorization token');
+    throw new UnauthorizedError('Authentication required');
   }
 
   try {
@@ -188,7 +188,7 @@ export async function jwtOnlyAuthMiddleware(
   const { token, source } = extractToken(request);
 
   if (!token || !source) {
-    throw new UnauthorizedError('Missing authorization token');
+    throw new UnauthorizedError('Authentication required');
   }
 
   try {

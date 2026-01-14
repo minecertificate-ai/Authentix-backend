@@ -97,11 +97,19 @@ export async function errorHandler(
 
   // Handle known errors
   if (error instanceof UnauthorizedError) {
+    // Minimal logging for 401 errors (no stack spam)
+    request.log.info({
+      requestId,
+      path: request.url,
+      method: request.method,
+      message: error.message,
+    }, `[401] Unauthorized: ${error.message}`);
+    
     await reply.status(401).send({
       success: false,
       error: {
         code: 'UNAUTHORIZED',
-        message: error.message,
+        message: error.message || 'Authentication required',
       },
       meta: {
         request_id: requestId,

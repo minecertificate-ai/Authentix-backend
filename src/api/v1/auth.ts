@@ -394,7 +394,12 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
    * POST /api/v1/auth/bootstrap
    * Bootstrap user after email verification
    * Creates organization, membership, and trial (idempotent)
-   * Requires valid JWT (but NOT organization membership - that's what we're creating)
+   * 
+   * Security:
+   * - REQUIRES valid JWT/cookie authentication (no anonymous bootstrap)
+   * - Does NOT require organization membership (that's what we're creating)
+   * - Returns 401 with clear message if no auth token present
+   * 
    * Note: This endpoint doesn't require a request body (empty JSON body is allowed)
    */
   app.post(
@@ -402,19 +407,29 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     {
       preHandler: async (request: FastifyRequest, reply: FastifyReply) => {
         // Use JWT-only auth (no membership required, since we're creating it)
+        // This middleware will throw UnauthorizedError if no token is present
+        // The error handler will convert it to a proper 401 JSON response
         const { jwtOnlyAuthMiddleware } = await import('../../lib/auth/middleware.js');
         await jwtOnlyAuthMiddleware(request, reply);
       },
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      try {
-        if (!request.auth?.userId) {
-          sendError(reply, 'UNAUTHORIZED', 'Missing authorization', 401);
-          return;
-        }
+      // At this point, auth is guaranteed (middleware throws if missing)
+      // Double-check for safety, but this should never be null after middleware
+      if (!request.auth?.userId) {
+        // This should never happen if middleware works correctly, but fail-safe
+        request.log.warn({ 
+          path: request.url,
+          hasAuth: !!request.auth,
+        }, '[Bootstrap] Auth check failed after middleware (unexpected)');
+        sendError(reply, 'UNAUTHORIZED', 'Authentication required', 401);
+        return;
+      }
 
-        const userId = request.auth.userId;
-        request.log.info({ userId }, 'Bootstrap request received');
+      const userId = request.auth.userId;
+      
+      try {
+        request.log.info({ userId }, '[Bootstrap] Request received');
 
         const service = new AuthService();
         const result = await service.bootstrap(userId);
@@ -423,33 +438,42 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           userId,
           organizationId: result.organization?.id,
           membershipId: result.membership?.id,
-        }, 'Bootstrap completed successfully');
+        }, '[Bootstrap] Completed successfully');
 
         sendSuccess(reply, result, 201);
       } catch (error) {
+        // Handle validation errors (400)
         if (error instanceof ValidationError) {
-          request.log.warn({ userId: request.auth?.userId, error: error.message }, 'Bootstrap validation error');
+          request.log.warn({ 
+            userId, 
+            step: 'validation',
+            error: error.message 
+          }, '[Bootstrap] Validation error');
           sendError(reply, 'VALIDATION_ERROR', error.message, 400);
-        } else {
-          const message = error instanceof Error ? error.message : 'Failed to bootstrap user';
-          
-          // Extract step from error message if present
-          const stepMatch = message.match(/\[Bootstrap Step: ([^\]]+)\]/);
-          const step = stepMatch ? stepMatch[1] : 'Unknown';
-          
-          request.log.error({ 
-            userId: request.auth?.userId, 
-            error: message,
-            step,
-            stack: error instanceof Error ? error.stack : undefined
-          }, 'Failed to bootstrap user');
-          
-          // Return structured error for bootstrap failures with step information
-          sendError(reply, 'bootstrap_failed', message, 500, {
-            step,
-            details: message,
-          });
+          return;
         }
+
+        // Handle actual bootstrap failures (500 with step info)
+        const message = error instanceof Error ? error.message : 'Failed to bootstrap user';
+        
+        // Extract step from error message if present
+        const stepMatch = message.match(/\[Bootstrap Step: ([^\]]+)\]/);
+        const step = stepMatch ? stepMatch[1] : 'unknown';
+        
+        // Log with step and PostgREST error details (for actual failures, not 401s)
+        request.log.error({ 
+          userId, 
+          step,
+          error_message: message,
+          // Only include stack for non-401 errors (401s are logged minimally in error handler)
+          stack: error instanceof Error ? error.stack : undefined
+        }, `[Bootstrap] Failed at step: ${step}`);
+        
+        // Return structured error for bootstrap failures with step information
+        sendError(reply, 'bootstrap_failed', message, 500, {
+          step,
+          details: message,
+        });
       }
     }
   );
