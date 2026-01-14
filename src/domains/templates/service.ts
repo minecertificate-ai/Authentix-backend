@@ -18,8 +18,8 @@ export class TemplateService {
   /**
    * Get template by ID
    */
-  async getById(id: string, companyId: string): Promise<TemplateEntity> {
-    const template = await this.repository.findById(id, companyId);
+  async getById(id: string, organizationId: string): Promise<TemplateEntity> {
+    const template = await this.repository.findById(id, organizationId);
 
     if (!template) {
       throw new NotFoundError('Template not found');
@@ -32,7 +32,7 @@ export class TemplateService {
    * List templates
    */
   async list(
-    companyId: string,
+    organizationId: string,
     options: {
       status?: string;
       page?: number;
@@ -46,7 +46,7 @@ export class TemplateService {
     const page = options.page ?? 1;
     const offset = (page - 1) * limit;
 
-    const { data, count } = await this.repository.findAll(companyId, {
+    const { data, count } = await this.repository.findAll(organizationId, {
       status: options.status,
       limit,
       offset,
@@ -148,7 +148,7 @@ export class TemplateService {
    * Uses magic byte validation for security (OWASP compliant)
    */
   async create(
-    companyId: string,
+    organizationId: string,
     userId: string,
     dto: CreateTemplateDTO,
     file: { buffer: Buffer; mimetype: string; originalname: string }
@@ -174,7 +174,7 @@ export class TemplateService {
 
     // Generate secure filename (never trust client input)
     const secureFilename = generateSecureFilename(validatedMimetype);
-    const storagePath = `templates/${companyId}/${secureFilename}`;
+    const storagePath = `templates/${organizationId}/${secureFilename}`;
 
     const { error: uploadError } = await supabase.storage
       .from('minecertificate')
@@ -195,7 +195,7 @@ export class TemplateService {
     const previewUrl = urlData.publicUrl;
 
     // Create template record
-    return this.repository.create(companyId, userId, dto, storagePath, previewUrl);
+    return this.repository.create(organizationId, userId, dto, storagePath, previewUrl);
   }
 
   /**
@@ -203,31 +203,31 @@ export class TemplateService {
    */
   async update(
     id: string,
-    companyId: string,
+    organizationId: string,
     dto: UpdateTemplateDTO
   ): Promise<TemplateEntity> {
     // Verify template exists
-    await this.getById(id, companyId);
+    await this.getById(id, organizationId);
 
-    return this.repository.update(id, companyId, dto);
+    return this.repository.update(id, organizationId, dto);
   }
 
   /**
    * Delete template
    */
-  async delete(id: string, companyId: string): Promise<void> {
+  async delete(id: string, organizationId: string): Promise<void> {
     // Verify template exists
-    await this.getById(id, companyId);
+    await this.getById(id, organizationId);
 
-    await this.repository.delete(id, companyId);
+    await this.repository.delete(id, organizationId);
   }
 
   /**
    * Get signed URL for template preview
    * Uses cache-first approach
    */
-  async getPreviewUrl(id: string, companyId: string): Promise<string> {
-    const template = await this.getById(id, companyId);
+  async getPreviewUrl(id: string, organizationId: string): Promise<string> {
+    const template = await this.getById(id, organizationId);
 
     if (!template.storage_path) {
       throw new NotFoundError('Template storage path not available');
@@ -260,18 +260,18 @@ export class TemplateService {
   }
 
   /**
-   * Get certificate categories for company
+   * Get certificate categories for organization
    */
-  async getCategories(companyId: string): Promise<{
+  async getCategories(organizationId: string): Promise<{
     categories: string[];
     categoryMap: Record<string, string[]>;
     industry: string | null;
   }> {
-    // Get company industry
-    const industry = await this.repository.getCompanyIndustry(companyId);
+    // Get organization industry
+    const industry = await this.repository.getOrganizationIndustry(organizationId);
 
     // Get categories
-    const rows = await this.repository.getCategories(companyId, industry);
+    const rows = await this.repository.getCategories(organizationId, industry);
 
     // Build category map
     const categoryMap: Record<string, string[]> = {};
@@ -305,7 +305,7 @@ export class TemplateService {
     });
 
     // Log for debugging
-    console.log(`[TemplateService] getCategories for company ${companyId}:`, {
+    console.log(`[TemplateService] getCategories for organization ${organizationId}:`, {
       industry,
       rowsFound: rows.length,
       categoriesFound: sortedCategories.length,

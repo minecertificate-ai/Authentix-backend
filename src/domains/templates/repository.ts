@@ -14,12 +14,12 @@ export class TemplateRepository {
   /**
    * Find template by ID
    */
-  async findById(id: string, companyId: string): Promise<TemplateEntity | null> {
+  async findById(id: string, organizationId: string): Promise<TemplateEntity | null> {
     const { data, error } = await this.supabase
       .from('certificate_templates')
       .select('*')
       .eq('id', id)
-      .eq('company_id', companyId)
+      .eq('organization_id', organizationId)
       .is('deleted_at', null)
       .maybeSingle();
 
@@ -31,10 +31,10 @@ export class TemplateRepository {
   }
 
   /**
-   * Find all templates for company
+   * Find all templates for organization
    */
   async findAll(
-    companyId: string,
+    organizationId: string,
     options: {
       status?: string;
       limit?: number;
@@ -46,7 +46,7 @@ export class TemplateRepository {
     let query = this.supabase
       .from('certificate_templates')
       .select('*', { count: 'exact' })
-      .eq('company_id', companyId)
+      .eq('organization_id', organizationId)
       .is('deleted_at', null);
 
     if (options.status) {
@@ -85,7 +85,7 @@ export class TemplateRepository {
    * Create template
    */
   async create(
-    companyId: string,
+    organizationId: string,
     userId: string,
     dto: CreateTemplateDTO,
     storagePath: string,
@@ -94,7 +94,7 @@ export class TemplateRepository {
     const { data, error } = await this.supabase
       .from('certificate_templates')
       .insert({
-        company_id: companyId,
+        organization_id: organizationId,
         name: dto.name,
         description: dto.description ?? null,
         file_type: dto.file_type,
@@ -123,7 +123,7 @@ export class TemplateRepository {
    */
   async update(
     id: string,
-    companyId: string,
+    organizationId: string,
     dto: UpdateTemplateDTO
   ): Promise<TemplateEntity> {
     const updateData: Record<string, unknown> = {
@@ -141,7 +141,7 @@ export class TemplateRepository {
       .from('certificate_templates')
       .update(updateData)
       .eq('id', id)
-      .eq('company_id', companyId)
+      .eq('organization_id', organizationId)
       .is('deleted_at', null)
       .select()
       .single();
@@ -160,7 +160,7 @@ export class TemplateRepository {
   /**
    * Soft delete template
    */
-  async delete(id: string, companyId: string): Promise<void> {
+  async delete(id: string, organizationId: string): Promise<void> {
     const { error } = await this.supabase
       .from('certificate_templates')
       .update({
@@ -168,7 +168,7 @@ export class TemplateRepository {
         status: 'archived',
       })
       .eq('id', id)
-      .eq('company_id', companyId)
+      .eq('organization_id', organizationId)
       .is('deleted_at', null);
 
     if (error) {
@@ -177,9 +177,9 @@ export class TemplateRepository {
   }
 
   /**
-   * Get certificate categories for company
+   * Get certificate categories for organization
    */
-  async getCategories(companyId: string, industry: string | null): Promise<Array<{
+  async getCategories(organizationId: string, industry: string | null): Promise<Array<{
     certificate_category: string;
     certificate_subcategory: string;
   }>> {
@@ -193,8 +193,8 @@ export class TemplateRepository {
       query = query.eq('industry', industry);
     }
 
-    // Get company-specific and system-wide categories
-    query = query.or(`company_id.is.null,company_id.eq.${companyId}`);
+    // Get organization-specific and system-wide categories
+    query = query.or(`organization_id.is.null,organization_id.eq.${organizationId}`);
 
     const { data, error } = await query;
 
@@ -209,20 +209,20 @@ export class TemplateRepository {
   }
 
   /**
-   * Get company industry
+   * Get organization industry
    */
-  async getCompanyIndustry(companyId: string): Promise<string | null> {
+  async getOrganizationIndustry(organizationId: string): Promise<string | null> {
     const { data, error } = await this.supabase
-      .from('companies')
-      .select('industry')
-      .eq('id', companyId)
+      .from('organizations')
+      .select('industry_id')
+      .eq('id', organizationId)
       .maybeSingle();
 
     if (error) {
-      throw new Error(`Failed to fetch company: ${error.message}`);
+      throw new Error(`Failed to fetch organization: ${error.message}`);
     }
 
-    return data?.industry ?? null;
+    return data ? (data.industry_id as string | null) : null;
   }
 
   /**
@@ -231,7 +231,7 @@ export class TemplateRepository {
   private mapToEntity(row: Record<string, unknown>): TemplateEntity {
     return {
       id: row.id as string,
-      company_id: row.company_id as string,
+      organization_id: row.organization_id as string,
       name: row.name as string,
       description: row.description as string | null,
       file_type: row.file_type as TemplateFileType,

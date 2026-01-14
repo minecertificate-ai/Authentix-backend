@@ -28,7 +28,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
 
   /**
    * GET /api/v1/templates
-   * List all templates for the authenticated company
+   * List all templates for the authenticated organization
    * Query params:
    *   - include: comma-separated list of fields to include (e.g., "preview_url")
    *   - status: filter by status
@@ -264,7 +264,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
 
   /**
    * GET /api/v1/templates/categories
-   * Get certificate categories for the authenticated company
+   * Get certificate categories for the authenticated organization
    */
   app.get(
     '/templates/categories',

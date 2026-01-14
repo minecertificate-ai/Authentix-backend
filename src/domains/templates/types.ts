@@ -77,7 +77,7 @@ export type UpdateTemplateDTO = z.infer<typeof updateTemplateSchema>;
  */
 export interface TemplateEntity {
   id: string;
-  company_id: string;
+  organization_id: string;
   name: string;
   description: string | null;
   file_type: TemplateFileType;
