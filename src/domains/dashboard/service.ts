@@ -23,35 +23,41 @@ export class DashboardService {
       return cached;
     }
 
-    // Cache miss - fetch from database
+    // Cache miss - fetch from database in parallel for better performance
     // Ensure partial failures don't break the entire dashboard
-    let stats: DashboardData['stats'] = {
-      totalCertificates: 0,
-      pendingJobs: 0,
-      verificationsToday: 0,
-      revokedCertificates: 0,
-    };
-    let recentImports: DashboardData['recentImports'] = [];
-    let recentVerifications: DashboardData['recentVerifications'] = [];
+    const [statsResult, importsResult, verificationsResult] = await Promise.allSettled([
+      this.repository.getStats(organizationId),
+      this.repository.getRecentImports(organizationId),
+      this.repository.getRecentVerifications(organizationId),
+    ]);
 
-    try {
-      stats = await this.repository.getStats(organizationId);
-    } catch (error) {
-      // Log and continue with defaults
-      // (logger is provided via Fastify; here we just swallow to avoid tight coupling)
-      console.error('[Dashboard] Failed to fetch stats', error);
+    // Extract results with defaults on failure
+    const stats: DashboardData['stats'] = statsResult.status === 'fulfilled'
+      ? statsResult.value
+      : {
+          totalCertificates: 0,
+          pendingJobs: 0,
+          verificationsToday: 0,
+          revokedCertificates: 0,
+        };
+
+    const recentImports: DashboardData['recentImports'] = importsResult.status === 'fulfilled'
+      ? importsResult.value
+      : [];
+
+    const recentVerifications: DashboardData['recentVerifications'] = verificationsResult.status === 'fulfilled'
+      ? verificationsResult.value
+      : [];
+
+    // Log failures (non-blocking)
+    if (statsResult.status === 'rejected') {
+      console.error('[Dashboard] Failed to fetch stats', statsResult.reason);
     }
-
-    try {
-      recentImports = await this.repository.getRecentImports(organizationId);
-    } catch (error) {
-      console.error('[Dashboard] Failed to fetch recent imports', error);
+    if (importsResult.status === 'rejected') {
+      console.error('[Dashboard] Failed to fetch recent imports', importsResult.reason);
     }
-
-    try {
-      recentVerifications = await this.repository.getRecentVerifications(organizationId);
-    } catch (error) {
-      console.error('[Dashboard] Failed to fetch recent verifications', error);
+    if (verificationsResult.status === 'rejected') {
+      console.error('[Dashboard] Failed to fetch recent verifications', verificationsResult.reason);
     }
 
     const dashboardData: DashboardData = {

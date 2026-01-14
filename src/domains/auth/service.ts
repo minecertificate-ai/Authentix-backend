@@ -605,64 +605,92 @@ export class AuthService {
 
     console.log(`[Bootstrap] Organization created successfully: org_id=${(newOrg as any).id}`);
 
-    // Ensure system roles exist for this organization
+    // Ensure system roles exist for this organization (parallelized for performance)
     console.log(`[Bootstrap Step: Roles Seed] Creating system roles for org_id: ${(newOrg as any).id}`);
     const systemRoles = ['owner', 'admin', 'member'];
-    for (const roleKey of systemRoles) {
+    const orgId = (newOrg as any).id;
+    
+    // Check all roles in parallel
+    const roleChecks = await Promise.all(
+      systemRoles.map(async (roleKey) => {
       const { data: existingRole, error: roleCheckError } = await supabase
         .from('organization_roles')
         .select('id')
-        .eq('organization_id', (newOrg as any).id)
+          .eq('organization_id', orgId)
         .eq('key', roleKey)
         .maybeSingle();
 
       if (roleCheckError && roleCheckError.code !== 'PGRST116') {
-        // PGRST116 = no rows found (expected if role doesn't exist)
-        const errorMessage = `[Bootstrap Step: Roles Seed] Failed to check existing role ${roleKey}: ${roleCheckError.message}`;
-        console.error(errorMessage, {
-          step: 'roles_seed_check',
-          role_key: roleKey,
-          organization_id: (newOrg as any).id,
-          error_code: roleCheckError.code,
-          error_details: roleCheckError.details,
-        });
-        throw new Error(`${errorMessage} (PostgREST code: ${roleCheckError.code || 'unknown'})`);
-      }
+          // PGRST116 = no rows found (expected if role doesn't exist)
+          const errorMessage = `[Bootstrap Step: Roles Seed] Failed to check existing role ${roleKey}: ${roleCheckError.message}`;
+          console.error(errorMessage, {
+            step: 'roles_seed_check',
+            role_key: roleKey,
+            organization_id: orgId,
+            error_code: roleCheckError.code,
+            error_details: roleCheckError.details,
+          });
+          throw new Error(`${errorMessage} (PostgREST code: ${roleCheckError.code || 'unknown'})`);
+        }
 
-      if (!existingRole) {
-        const { error: roleInsertError } = await supabase.from('organization_roles').insert({
-          organization_id: (newOrg as any).id,
+        return { roleKey, existingRole };
+      })
+    );
+
+    // Create missing roles in parallel
+    const rolesToCreate = roleChecks
+      .filter(({ existingRole }) => !existingRole)
+      .map(({ roleKey }) => ({
+        organization_id: orgId,
           key: roleKey,
           name: roleKey.charAt(0).toUpperCase() + roleKey.slice(1),
           is_system: true,
-        } as any);
+      }));
+
+    if (rolesToCreate.length > 0) {
+      const { data: createdRoles, error: roleInsertError } = await supabase
+        .from('organization_roles')
+        .insert(rolesToCreate as any)
+        .select('id, key');
 
         if (roleInsertError) {
-          const errorMessage = `[Bootstrap Step: Roles Seed] Failed to create role ${roleKey}: ${roleInsertError.message}`;
-          console.error(errorMessage, {
-            step: 'roles_seed_create',
-            role_key: roleKey,
-            organization_id: (newOrg as any).id,
-            error_code: roleInsertError.code,
-            error_details: roleInsertError.details,
-            error_hint: roleInsertError.hint,
-          });
-          throw new Error(`${errorMessage} (PostgREST code: ${roleInsertError.code || 'unknown'})`);
-        } else {
-          console.log(`[Bootstrap Step: Roles Seed] Created role: ${roleKey}`);
-        }
-      } else {
-        console.log(`[Bootstrap Step: Roles Seed] Role ${roleKey} already exists, skipping creation`);
+        const errorMessage = `[Bootstrap Step: Roles Seed] Failed to create roles: ${roleInsertError.message}`;
+        console.error(errorMessage, {
+          step: 'roles_seed_create',
+          organization_id: orgId,
+          error_code: roleInsertError.code,
+          error_details: roleInsertError.details,
+          error_hint: roleInsertError.hint,
+        });
+        throw new Error(`${errorMessage} (PostgREST code: ${roleInsertError.code || 'unknown'})`);
       }
+      console.log(`[Bootstrap Step: Roles Seed] Created ${rolesToCreate.length} role(s) in parallel`);
     }
 
-    // Get owner role
-    const { data: ownerRole, error: ownerRoleError } = await supabase
+    // Get owner role (use existing or created)
+    let ownerRole = roleChecks.find(({ roleKey, existingRole }) => roleKey === 'owner' && existingRole);
+    
+    if (!ownerRole) {
+      // Owner role was just created, fetch it
+      const { data: ownerRoleData, error: ownerRoleError } = await supabase
       .from('organization_roles')
       .select('id')
-      .eq('organization_id', (newOrg as any).id)
+        .eq('organization_id', orgId)
       .eq('key', 'owner')
       .single();
+
+      if (ownerRoleError) {
+        const errorMessage = `[Bootstrap Step: Role Lookup] Failed to find owner role: ${ownerRoleError.message}`;
+        console.error(errorMessage, {
+          step: 'role_lookup_owner',
+          organization_id: orgId,
+          error_code: ownerRoleError.code,
+          error_details: ownerRoleError.details,
+        });
+        throw new Error(`${errorMessage} (PostgREST code: ${ownerRoleError.code || 'unknown'})`);
+      }
+      ownerRole = { roleKey: 'owner', existingRole: ownerRoleData };
+    }
 
     if (ownerRoleError) {
       const errorMessage = `[Bootstrap Step: Role Lookup] Failed to find owner role: ${ownerRoleError.message}`;
@@ -674,13 +702,14 @@ export class AuthService {
       });
       throw new Error(`${errorMessage} (PostgREST code: ${ownerRoleError.code || 'unknown'})`);
     }
-    if (!ownerRole) {
-      const errorMessage = `[Bootstrap Step: Role Lookup] Owner role not found after creation for org_id=${(newOrg as any).id}`;
-      console.error(errorMessage, { step: 'role_lookup_owner', organization_id: (newOrg as any).id });
+    if (!ownerRole || !ownerRole.existingRole) {
+      const errorMessage = `[Bootstrap Step: Role Lookup] Owner role not found after creation for org_id=${orgId}`;
+      console.error(errorMessage, { step: 'role_lookup_owner', organization_id: orgId });
       throw new Error(errorMessage);
     }
 
-    console.log(`[Bootstrap] Owner role found: role_id=${(ownerRole as any).id}`);
+    const ownerRoleId = ownerRole.existingRole.id;
+    console.log(`[Bootstrap] Owner role found: role_id=${ownerRoleId}`);
 
     // Generate unique username
     const baseUsername = authUser.email?.split('@')[0] || 'user';
@@ -706,14 +735,14 @@ export class AuthService {
     console.log(`[Bootstrap] Generated unique username: ${username}`);
 
     // Create membership
-    console.log(`[Bootstrap] Creating membership: user_id=${userId}, org_id=${(newOrg as any).id}, role_id=${(ownerRole as any).id}`);
+    console.log(`[Bootstrap] Creating membership: user_id=${userId}, org_id=${orgId}, role_id=${ownerRoleId}`);
     const { data: newMembership, error: memberError } = await supabase
       .from('organization_members')
       .insert({
-        organization_id: (newOrg as any).id,
+        organization_id: orgId,
         user_id: userId,
         username,
-        role_id: (ownerRole as any).id,
+        role_id: ownerRoleId,
         status: 'active',
       } as any)
       .select()
@@ -724,8 +753,8 @@ export class AuthService {
       console.error(errorMessage, {
         step: 'membership_creation',
         userId,
-        organization_id: (newOrg as any).id,
-        role_id: (ownerRole as any).id,
+        organization_id: orgId,
+        role_id: ownerRoleId,
         username,
         error_code: memberError.code,
         error_details: memberError.details,
@@ -734,30 +763,30 @@ export class AuthService {
       throw new Error(`${errorMessage} (PostgREST code: ${memberError.code || 'unknown'})`);
     }
     if (!newMembership) {
-      const errorMessage = `[Bootstrap Step: Membership Creation] Membership insert returned no data for user_id=${userId}, org_id=${(newOrg as any).id}`;
+      const errorMessage = `[Bootstrap Step: Membership Creation] Membership insert returned no data for user_id=${userId}, org_id=${orgId}`;
       console.error(errorMessage, {
         step: 'membership_creation',
         userId,
-        organization_id: (newOrg as any).id,
+        organization_id: orgId,
       });
       throw new Error(errorMessage);
     }
 
     console.log(`[Bootstrap] Membership created successfully: membership_id=${(newMembership as any).id}`);
 
-    // Write audit logs
+    // Write audit logs (non-blocking - don't fail bootstrap if audit fails)
     console.log(`[Bootstrap Step: Audit Logs] Writing audit logs`);
     const { error: auditError } = await supabase.from('app_audit_logs').insert([
       {
-        organization_id: (newOrg as any).id,
+        organization_id: orgId,
         actor_user_id: userId,
         action: 'org.created',
         entity_type: 'organization',
-        entity_id: (newOrg as any).id,
+        entity_id: orgId,
         metadata: { name: companyName, slug },
       },
       {
-        organization_id: (newOrg as any).id,
+        organization_id: orgId,
         actor_user_id: userId,
         action: 'member.joined',
         entity_type: 'organization_member',
