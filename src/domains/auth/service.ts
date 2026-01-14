@@ -238,6 +238,95 @@ export class AuthService {
 
     console.log(`[Bootstrap] Starting bootstrap for user_id: ${userId}`);
 
+    /**
+     * Helper to ensure profile exists for a user.
+     * - profiles.id MUST equal auth.user.id
+     * - Idempotent: safe to call multiple times
+     */
+    const ensureProfileExists = async () => {
+      // Check if profile already exists
+      const { data: existingProfile, error: profileCheckError } = await supabase
+        .from('profiles')
+        .select('id, first_name, last_name, email')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (profileCheckError && profileCheckError.code !== 'PGRST116') {
+        console.error(
+          `[Bootstrap] Error checking profile for user_id=${userId}: ${profileCheckError.message}`,
+          profileCheckError
+        );
+        throw new Error(
+          `[Bootstrap Step: Profile Check] Failed to check profile: ${profileCheckError.message}`
+        );
+      }
+
+      if (existingProfile) {
+        console.log(
+          `[Bootstrap Step: Profile Creation] Profile already exists for user_id=${userId}, skipping creation`
+        );
+        return existingProfile;
+      }
+
+      console.log(
+        `[Bootstrap Step: Profile Creation] Creating profile for user_id: ${userId} (ensureProfileExists)`
+      );
+
+      // Fetch auth user to populate email / name
+      const {
+        data: { user: authUserForProfile },
+        error: authUserForProfileError,
+      } = await supabase.auth.admin.getUserById(userId);
+
+      if (authUserForProfileError) {
+        console.error(
+          `[Bootstrap Step: Profile Creation] Error fetching auth user for profile creation: ${authUserForProfileError.message}`,
+          authUserForProfileError
+        );
+        throw new Error(
+          `[Bootstrap Step: Profile Creation] Failed to fetch auth user: ${authUserForProfileError.message}`
+        );
+      }
+
+      if (!authUserForProfile) {
+        console.error(
+          `[Bootstrap Step: Profile Creation] Auth user not found while creating profile for user_id=${userId}`
+        );
+        throw new Error('[Bootstrap Step: Profile Creation] User not found in auth.users');
+      }
+
+      const fullNameForProfile = (authUserForProfile.user_metadata?.full_name as string) || '';
+      const [firstNameForProfile, ...lastNamePartsForProfile] = fullNameForProfile.split(' ');
+      const lastNameForProfile = lastNamePartsForProfile.join(' ');
+
+      const { data: insertedProfile, error: profileInsertError } = await supabase
+        .from('profiles')
+        .insert({
+          id: userId,
+          first_name: firstNameForProfile || 'User',
+          last_name: lastNameForProfile || '',
+          email: authUserForProfile.email,
+        } as any)
+        .select('id, first_name, last_name, email')
+        .single();
+
+      if (profileInsertError) {
+        console.error(
+          `[Bootstrap Step: Profile Creation] Error creating profile for user_id=${userId}: ${profileInsertError.message}`,
+          profileInsertError
+        );
+        throw new Error(
+          `[Bootstrap Step: Profile Creation] Failed to create profile: ${profileInsertError.message}`
+        );
+      }
+
+      console.log(
+        `[Bootstrap Step: Profile Creation] Profile created successfully for user_id=${userId}`
+      );
+
+      return insertedProfile;
+    };
+
     // Check if user already has an active organization (idempotency check)
     console.log(`[Bootstrap Step: Lookup Membership] Checking for existing membership for user_id: ${userId}`);
     const { data: existingMembership, error: membershipCheckError } = await supabase
@@ -266,23 +355,20 @@ export class AuthService {
       .maybeSingle();
 
     if (membershipCheckError) {
-      console.error(`[Bootstrap Step: Lookup Membership] Error checking membership: ${membershipCheckError.message}`, membershipCheckError);
-      throw new Error(`[Bootstrap Step: Lookup Membership] Failed to check existing membership: ${membershipCheckError.message}`);
+      console.error(
+        `[Bootstrap Step: Lookup Membership] Error checking membership: ${membershipCheckError.message}`,
+        membershipCheckError
+      );
+      throw new Error(
+        `[Bootstrap Step: Lookup Membership] Failed to check existing membership: ${membershipCheckError.message}`
+      );
     }
 
     if (existingMembership) {
       console.log(`[Bootstrap] User already has membership, returning existing data. membership_id: ${existingMembership.id}, org_id: ${(existingMembership as any).organization_id}`);
-      // User already bootstrapped - return existing data
+      // User already bootstrapped - ensure profile exists and return existing data
       const org = (existingMembership as any).organizations;
-      const { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('id, first_name, last_name, email, created_at')
-        .eq('id', userId)
-        .single();
-
-      if (profileError) {
-        console.error(`[Bootstrap] Error fetching profile: ${profileError.message}`, profileError);
-      }
+      const profile = await ensureProfileExists();
 
       const membership = existingMembership as any;
 
@@ -321,39 +407,11 @@ export class AuthService {
 
     const fullName = (authUser.user_metadata?.full_name as string) || '';
     const companyName = (authUser.user_metadata?.company_name as string) || authUser.email?.split('@')[0] || 'My Organization';
-    const [firstName, ...lastNameParts] = fullName.split(' ');
-    const lastName = lastNameParts.join(' ');
 
     console.log(`[Bootstrap] Extracted metadata - full_name: "${fullName}", company_name: "${companyName}"`);
 
-    // Create profile if it doesn't exist
-    const { data: existingProfile, error: profileCheckError } = await supabase
-      .from('profiles')
-      .select('id')
-      .eq('id', userId)
-      .maybeSingle();
-
-    if (profileCheckError && profileCheckError.code !== 'PGRST116') {
-      console.error(`[Bootstrap] Error checking profile: ${profileCheckError.message}`, profileCheckError);
-    }
-
-    if (!existingProfile) {
-      console.log(`[Bootstrap Step: Profile Creation] Creating profile for user_id: ${userId}`);
-      const { error: profileInsertError } = await supabase.from('profiles').insert({
-        id: userId,
-        first_name: firstName || 'User',
-        last_name: lastName || '',
-        email: authUser.email,
-      } as any);
-
-      if (profileInsertError) {
-        console.error(`[Bootstrap Step: Profile Creation] Error creating profile: ${profileInsertError.message}`, profileInsertError);
-        throw new Error(`[Bootstrap Step: Profile Creation] Failed to create profile: ${profileInsertError.message}`);
-      }
-      console.log(`[Bootstrap Step: Profile Creation] Profile created successfully`);
-    } else {
-      console.log(`[Bootstrap Step: Profile Creation] Profile already exists, skipping creation`);
-    }
+    // Ensure profile exists before proceeding with organization creation
+    await ensureProfileExists();
 
     // Generate unique slug for organization
     // Slug must be exactly 20 characters, only lowercase letters [a-z]

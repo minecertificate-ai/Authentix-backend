@@ -14,13 +14,7 @@ export class UserService {
   /**
    * Get user profile
    */
-  async getProfile(userId: string): Promise<UserProfile> {
-    const profile = await this.repository.getProfile(userId);
-
-    if (!profile) {
-      throw new NotFoundError('User profile not found');
-    }
-
-    return profile;
+  async getProfile(userId: string): Promise<UserProfile | null> {
+    return this.repository.getProfile(userId);
   }
 }
