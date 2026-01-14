@@ -64,7 +64,7 @@ export async function registerUserRoutes(app: FastifyInstance): Promise<void> {
             full_name: profile.full_name,
           },
           organization: profile.organization,
-          role: profile.membership?.role ?? null,
+          role: profile.membership?.role_key ?? null,
         };
 
         sendSuccess(reply, responseBody);
