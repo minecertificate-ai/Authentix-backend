@@ -65,7 +65,7 @@ export async function registerUserRoutes(app: FastifyInstance): Promise<void> {
         // {
         //   profile,
         //   organization,
-        //   role
+        //   membership (includes role_key)
         // }
         const responseBody = {
           profile: {
@@ -76,7 +76,14 @@ export async function registerUserRoutes(app: FastifyInstance): Promise<void> {
             full_name: profile.full_name,
           },
           organization: profile.organization,
-          role: profile.membership?.role_key ?? null,
+          membership: profile.membership ? {
+            id: profile.membership.id,
+            organization_id: profile.membership.organization_id,
+            username: profile.membership.username,
+            role_id: profile.membership.role_id,
+            role_key: profile.membership.role_key,
+            status: profile.membership.status,
+          } : null,
         };
 
         sendSuccess(reply, responseBody);
