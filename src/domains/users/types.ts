@@ -14,13 +14,17 @@ export interface UserProfile {
     id: string;
     name: string;
     slug: string;
-    logo: string | null;
+    application_id: string;
+    billing_status: string;
+    industry_id: string | null;
+    logo_file_id: string | null;
   } | null;
   membership: {
     id: string;
     organization_id: string;
     username: string;
-    role: string;
+    role_id: string;
+    role_key: string;
     status: string;
   } | null;
 }

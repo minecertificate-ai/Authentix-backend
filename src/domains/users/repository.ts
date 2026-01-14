@@ -36,14 +36,19 @@ export class UserRepository {
         id,
         organization_id,
         username,
+        role_id,
         status,
         organizations:organization_id (
           id,
           name,
           slug,
-          logo
+          application_id,
+          billing_status,
+          industry_id,
+          logo_file_id
         ),
         organization_roles:role_id (
+          id,
           key
         )
       `)
@@ -66,19 +71,27 @@ export class UserRepository {
       first_name: profile.first_name,
       last_name: profile.last_name,
       full_name: fullName,
-      organization: membership ? {
-        id: (membership as any).organizations.id,
-        name: (membership as any).organizations.name,
-        slug: (membership as any).organizations.slug,
-        logo: (membership as any).organizations.logo,
-      } : null,
-      membership: membership ? {
-        id: membership.id,
-        organization_id: membership.organization_id,
-        username: membership.username,
-        role: (membership as any).organization_roles?.key || 'member',
-        status: membership.status,
-      } : null,
+      organization: membership
+        ? {
+            id: (membership as any).organizations.id,
+            name: (membership as any).organizations.name,
+            slug: (membership as any).organizations.slug,
+            application_id: (membership as any).organizations.application_id,
+            billing_status: (membership as any).organizations.billing_status,
+            industry_id: (membership as any).organizations.industry_id,
+            logo_file_id: (membership as any).organizations.logo_file_id ?? null,
+          }
+        : null,
+      membership: membership
+        ? {
+            id: membership.id,
+            organization_id: membership.organization_id,
+            username: membership.username,
+            role_id: membership.role_id,
+            role_key: (membership as any).organization_roles?.key || 'member',
+            status: membership.status,
+          }
+        : null,
     };
   }
 }

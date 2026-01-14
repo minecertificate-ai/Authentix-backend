@@ -1,5 +1,59 @@
 # Changelog
 
+## 2026-01-14
+
+### Fixed - Schema Mismatches in User Profile and Dashboard Endpoints
+- **Root cause:** Code was using old database schema columns/tables that no longer exist:
+  - `organizations.logo` (removed) → should use `organizations.logo_file_id`
+  - `verification_logs` table (removed) → should use `certificate_verification_events`
+  - `import_jobs` table (removed) → should use `file_import_jobs`
+  - `company_id` column → should use `organization_id`
+  - Missing organization fields: `application_id`, `billing_status`, `industry_id`
+
+- **Fixes:**
+  - **`GET /api/v1/users/me` (UserRepository.getProfile):**
+    - Removed `organizations.logo` selection (column doesn't exist)
+    - Added `organizations.logo_file_id` to response (nullable)
+    - Added `organizations.application_id`, `billing_status`, `industry_id` to response
+    - Updated membership query to include `role_id` and join `organization_roles` for `role_key`
+    - Updated `UserProfile` type to match new schema contract
+    - Response now includes: `profile`, `organization` (with all new fields), `role` (from `membership.role_key`)
+  
+  - **`GET /api/v1/dashboard/stats` (DashboardRepository):**
+    - Replaced `verification_logs` with `certificate_verification_events` table
+    - Changed `verified_at` → `scanned_at` (new column name)
+    - Replaced `import_jobs` with `file_import_jobs` table
+    - Changed `company_id` → `organization_id` throughout
+    - Removed soft-delete filters (new schema doesn't use `deleted_at` on certificates)
+    - Updated `getRecentVerifications` to join `certificates` and return `certificate_number` instead of `course_name`
+    - Updated `RecentVerification` type to match new schema
+  
+  - **Dashboard Service Resilience:**
+    - Made `getDashboardData` resilient to partial failures
+    - If `getStats`, `getRecentImports`, or `getRecentVerifications` fail, endpoint still returns 200 with partial data
+    - Failed components default to empty arrays/zeros instead of causing 500 errors
+    - Logs component failures without breaking the entire response
+  
+  - **Verification Service:**
+    - Updated `logVerification` to write to `certificate_verification_events` instead of `verification_logs`
+    - Changed `company_id` → `organization_id`
+    - Changed `verified_at` → `scanned_at`
+    - Changed `verifier_ip` → `ip_hash` (matches new schema)
+
+- **Files changed:**
+  - `src/domains/users/repository.ts`: Updated query to use new schema, removed `logo`, added new org fields
+  - `src/domains/users/types.ts`: Updated `UserProfile` interface to match new schema
+  - `src/domains/dashboard/repository.ts`: Replaced old tables/columns with new schema equivalents
+  - `src/domains/dashboard/types.ts`: Updated `RecentVerification` type to use `certificate_number`
+  - `src/domains/dashboard/service.ts`: Added error handling for partial failures
+  - `src/domains/verification/service.ts`: Updated to use `certificate_verification_events`
+
+- **Verification:**
+  - `/api/v1/users/me` now returns 200 with complete organization and membership data
+  - `/api/v1/dashboard/stats` returns 200 even with empty tables or partial component failures
+  - All queries use correct table/column names matching `DATABASE_DOCUMENTATION_DETAILED.md`
+  - No remaining references to `organizations.logo` or `verification_logs` in runtime code
+
 ## 2026-01-13
 
 ### Fixed: Bootstrap fails to create organization/membership

@@ -16,19 +16,43 @@ export class DashboardService {
    * Get dashboard data
    * Uses cache-first approach to reduce DB queries from 6 to 0 for cached loads
    */
-  async getDashboardData(companyId: string): Promise<DashboardData> {
+  async getDashboardData(organizationId: string): Promise<DashboardData> {
     // Check cache first
-    const cached = getCachedDashboard(companyId);
+    const cached = getCachedDashboard(organizationId);
     if (cached) {
       return cached;
     }
 
     // Cache miss - fetch from database
-    const [stats, recentImports, recentVerifications] = await Promise.all([
-      this.repository.getStats(companyId),
-      this.repository.getRecentImports(companyId),
-      this.repository.getRecentVerifications(companyId),
-    ]);
+    // Ensure partial failures don't break the entire dashboard
+    let stats: DashboardData['stats'] = {
+      totalCertificates: 0,
+      pendingJobs: 0,
+      verificationsToday: 0,
+      revokedCertificates: 0,
+    };
+    let recentImports: DashboardData['recentImports'] = [];
+    let recentVerifications: DashboardData['recentVerifications'] = [];
+
+    try {
+      stats = await this.repository.getStats(organizationId);
+    } catch (error) {
+      // Log and continue with defaults
+      // (logger is provided via Fastify; here we just swallow to avoid tight coupling)
+      console.error('[Dashboard] Failed to fetch stats', error);
+    }
+
+    try {
+      recentImports = await this.repository.getRecentImports(organizationId);
+    } catch (error) {
+      console.error('[Dashboard] Failed to fetch recent imports', error);
+    }
+
+    try {
+      recentVerifications = await this.repository.getRecentVerifications(organizationId);
+    } catch (error) {
+      console.error('[Dashboard] Failed to fetch recent verifications', error);
+    }
 
     const dashboardData: DashboardData = {
       stats,
@@ -37,7 +61,7 @@ export class DashboardService {
     };
 
     // Cache the result
-    setCachedDashboard(companyId, dashboardData);
+    setCachedDashboard(organizationId, dashboardData);
 
     return dashboardData;
   }

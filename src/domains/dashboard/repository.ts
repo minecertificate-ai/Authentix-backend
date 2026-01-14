@@ -13,7 +13,7 @@ export class DashboardRepository {
   /**
    * Get dashboard statistics
    */
-  async getStats(companyId: string): Promise<DashboardStats> {
+  async getStats(organizationId: string): Promise<DashboardStats> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayISO = today.toISOString();
@@ -23,31 +23,28 @@ export class DashboardRepository {
       this.supabase
         .from('certificates')
         .select('id', { count: 'exact', head: true })
-        .eq('company_id', companyId)
-        .is('deleted_at', null),
+        .eq('organization_id', organizationId),
 
       // Pending jobs
       this.supabase
-        .from('import_jobs')
+        .from('file_import_jobs')
         .select('id', { count: 'exact', head: true })
-        .eq('company_id', companyId)
-        .in('status', ['queued', 'processing'])
-        .is('deleted_at', null),
+        .eq('organization_id', organizationId)
+        .in('status', ['queued', 'processing']),
 
       // Verifications today
       this.supabase
-        .from('verification_logs')
+        .from('certificate_verification_events')
         .select('id', { count: 'exact', head: true })
-        .eq('company_id', companyId)
-        .gte('verified_at', todayISO),
+        .eq('organization_id', organizationId)
+        .gte('scanned_at', todayISO),
 
       // Revoked certificates
       this.supabase
         .from('certificates')
         .select('id', { count: 'exact', head: true })
-        .eq('company_id', companyId)
-        .eq('status', 'revoked')
-        .is('deleted_at', null),
+        .eq('organization_id', organizationId)
+        .eq('status', 'revoked'),
     ]);
 
     return {
@@ -61,12 +58,11 @@ export class DashboardRepository {
   /**
    * Get recent imports
    */
-  async getRecentImports(companyId: string, limit: number = 5): Promise<RecentImport[]> {
+  async getRecentImports(organizationId: string, limit: number = 5): Promise<RecentImport[]> {
     const { data, error } = await this.supabase
-      .from('import_jobs')
+      .from('file_import_jobs')
       .select('id, file_name, status, total_rows, created_at')
-      .eq('company_id', companyId)
-      .is('deleted_at', null)
+      .eq('organization_id', organizationId)
       .order('created_at', { ascending: false })
       .limit(limit);
 
@@ -80,20 +76,20 @@ export class DashboardRepository {
   /**
    * Get recent verifications
    */
-  async getRecentVerifications(companyId: string, limit: number = 5): Promise<RecentVerification[]> {
+  async getRecentVerifications(organizationId: string, limit: number = 5): Promise<RecentVerification[]> {
     const { data, error } = await this.supabase
-      .from('verification_logs')
+      .from('certificate_verification_events')
       .select(`
         id,
         result,
-        verified_at,
-        certificates (
+        scanned_at,
+        certificates:certificate_id (
           recipient_name,
-          course_name
+          certificate_number
         )
       `)
-      .eq('company_id', companyId)
-      .order('verified_at', { ascending: false })
+      .eq('organization_id', organizationId)
+      .order('scanned_at', { ascending: false })
       .limit(limit);
 
     if (error) {
@@ -103,11 +99,13 @@ export class DashboardRepository {
     return (data ?? []).map((item: any) => ({
       id: item.id,
       result: item.result,
-      verified_at: item.verified_at,
-      certificate: item.certificates ? {
-        recipient_name: item.certificates.recipient_name,
-        course_name: item.certificates.course_name,
-      } : null,
+      verified_at: item.scanned_at,
+      certificate: item.certificates
+        ? {
+            recipient_name: item.certificates.recipient_name,
+            certificate_number: item.certificates.certificate_number,
+          }
+        : null,
     })) as RecentVerification[];
   }
 }

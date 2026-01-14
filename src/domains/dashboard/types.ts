@@ -25,7 +25,7 @@ export interface RecentVerification {
   verified_at: string;
   certificate: {
     recipient_name: string;
-    course_name: string | null;
+    certificate_number: string;
   } | null;
 }
 
