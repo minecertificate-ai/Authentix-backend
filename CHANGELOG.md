@@ -2,6 +2,66 @@
 
 ## 2026-01-14
 
+### Fixed - Template Upload Storage Path and Validation
+- **Root cause:** Template upload was using incorrect storage paths and had validation issues:
+  - Legacy storage paths (`org/`, `templates/`, `minecertificate/`) violating `files_path_chk` constraint
+  - Incorrect path format: `certificate_templates/<org_id>/<template_id>/v0001/source/<filename>` instead of `certificate_templates/<org_id>/<template_id>/v{version_padded}/source.<ext>`
+  - Title validation not enforcing required/trimmed/max length properly
+  - No constraint error handling for `files_path_chk` violations
+  - Partial inserts possible if steps failed mid-process
+
+- **Fixes:**
+  - **Storage Path Validator (`src/lib/storage/path-validator.ts`):**
+    - Created comprehensive storage path validator enforcing allowed roots only
+    - Allowed roots: `org_branding`, `certificate_templates`, `file_imports`, `certificates`, `exports`, `deliveries`, `invoices`
+    - Rejects legacy paths (`org/`, `templates/`, `minecertificate/`)
+    - Enforces path length <= 512 characters (DB constraint)
+    - Generates canonical template paths:
+      - Source: `certificate_templates/<org_id>/<template_id>/v{version_padded}/source.<ext>`
+      - Preview: `certificate_templates/<org_id>/<template_id>/v{version_padded}/preview.webp`
+    - Handles Postgres constraint errors (`files_path_chk`) with user-friendly messages
+  
+  - **Template Upload (`src/domains/templates/service.ts`):**
+    - Title validation: required, trimmed, max 255 characters (enforced before DB insert)
+    - Path generation: uses `generateTemplateSourcePath()` for canonical format
+    - Strict insert order:
+      1. Create `certificate_templates`
+      2. Upload file to storage
+      3. Create `files` entry (with constraint error handling)
+      4. Create `certificate_template_versions`
+      5. Update `certificate_templates.latest_version_id`
+    - Error handling: catches `files_path_chk` constraint violations and provides clear errors
+    - Cleanup: rolls back on failure (deletes file entry and storage object)
+  
+  - **API Endpoint (`src/api/v1/templates.ts`):**
+    - Title validation: required, trimmed, max 255 characters
+    - Constraint error handling: catches `files_path_chk` violations and returns structured errors
+    - Removed backward compatibility for `name` field (uses `title` only)
+  
+  - **Preview Generator (`src/domains/templates/preview-generator.ts`):**
+    - Uses `generateTemplatePreviewPath()` for canonical preview paths
+    - Handles constraint violations with clear error messages
+
+- **Files changed:**
+  - `src/lib/storage/path-validator.ts`: New storage path validator and canonical path generators
+  - `src/lib/storage/README.md`: Documentation for storage paths and PostgREST schema cache
+  - `src/domains/templates/service.ts`: Fixed path generation, title validation, error handling
+  - `src/api/v1/templates.ts`: Fixed title validation, constraint error handling
+  - `src/domains/templates/preview-generator.ts`: Fixed preview path generation
+
+- **PostgREST Schema Cache:**
+  - After running migrations that modify `files_path_chk`, execute: `NOTIFY pgrst, 'reload schema';`
+  - Documented in `src/lib/storage/README.md`
+
+- **Verification:**
+  - Template upload never fails due to `files_path_chk` (paths validated before DB insert)
+  - Title validation is deterministic (required, trimmed, max 255 chars)
+  - No legacy storage paths remain (validator rejects them)
+  - Template list renders immediately after upload (no UX regressions)
+  - All paths use canonical format: `certificate_templates/<org_id>/<template_id>/v{version_padded}/source.<ext>`
+
+## 2026-01-14
+
 ### Fixed - Schema Mismatches in User Profile and Dashboard Endpoints
 - **Root cause:** Code was using old database schema columns/tables that no longer exist:
   - `organizations.logo` (removed) → should use `organizations.logo_file_id` + join `files`

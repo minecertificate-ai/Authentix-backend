@@ -145,8 +145,14 @@ export async function generateTemplatePreview(
     throw new Error(`[PreviewGenerator] Preview generation not supported for file type: ${sourceMimeType}`);
   }
 
-  // Step 4: Generate storage path
-  const previewPath = `certificate_templates/${organizationId}/${templateId}/v${versionNumber.toString().padStart(4, '0')}/preview.${previewExtension}`;
+  // Step 4: Generate canonical storage path
+  const { generateTemplatePreviewPath } = await import('../../lib/storage/path-validator.js');
+  const previewPath = generateTemplatePreviewPath(
+    organizationId,
+    templateId,
+    versionNumber,
+    previewExtension === 'webp' ? 'webp' : previewExtension === 'png' ? 'png' : 'pdf'
+  );
 
   // Step 5: Upload preview to storage
   const { error: uploadError } = await supabase.storage
@@ -164,25 +170,38 @@ export async function generateTemplatePreview(
   const { computeSHA256 } = await import('../../lib/uploads/checksum.js');
   const checksum = computeSHA256(previewBuffer);
 
-  const { data: fileData, error: fileInsertError } = await supabase
-    .from('files')
-    .insert({
-      organization_id: organizationId,
-      bucket: 'authentix',
-      path: previewPath,
-      kind: 'template_preview',
-      original_name: `preview.${previewExtension}`,
-      mime_type: previewMimeType,
-      size_bytes: previewBuffer.length,
-      checksum_sha256: checksum,
-    } as any)
-    .select('id, bucket, path, mime_type, size_bytes')
-    .single();
+  let fileData: any;
+  try {
+    const { data, error: fileInsertError } = await supabase
+      .from('files')
+      .insert({
+        organization_id: organizationId,
+        bucket: 'authentix',
+        path: previewPath,
+        kind: 'template_preview',
+        original_name: `preview.${previewExtension}`,
+        mime_type: previewMimeType,
+        size_bytes: previewBuffer.length,
+        checksum_sha256: checksum,
+      } as any)
+      .select('id, bucket, path, mime_type, size_bytes')
+      .single();
 
-  if (fileInsertError || !fileData) {
-    // Cleanup: delete uploaded file if DB insert fails
-    await supabase.storage.from('authentix').remove([previewPath]);
-    throw new Error(`[PreviewGenerator] Failed to create file registry entry: ${fileInsertError?.message || 'No data returned'}`);
+    if (fileInsertError || !data) {
+      // Cleanup: delete uploaded file if DB insert fails
+      await supabase.storage.from('authentix').remove([previewPath]);
+      throw new Error(`[PreviewGenerator] Failed to create file registry entry: ${fileInsertError?.message || 'No data returned'}`);
+    }
+
+    fileData = data;
+  } catch (error: any) {
+    // Handle constraint violations
+    if (error?.code === '23514' || error?.message?.includes('files_path_chk')) {
+      await supabase.storage.from('authentix').remove([previewPath]);
+      const { handleStoragePathConstraintError } = await import('../../lib/storage/path-validator.js');
+      throw handleStoragePathConstraintError(error, previewPath, organizationId, templateId);
+    }
+    throw error;
   }
 
   // Step 7: Update version with preview_file_id

@@ -418,24 +418,52 @@ export class TemplateService {
       });
     }
 
+    // Validate title (required, trimmed)
+    const trimmedTitle = dto.title.trim();
+    if (trimmedTitle.length === 0) {
+      throw new ValidationError('Title is required', {
+        code: 'TITLE_REQUIRED',
+        field: 'title',
+      });
+    }
+    if (trimmedTitle.length > 255) {
+      throw new ValidationError('Title must be 255 characters or less', {
+        code: 'TITLE_TOO_LONG',
+        field: 'title',
+        length: trimmedTitle.length,
+      });
+    }
+
     // Step 1: Create template record first (to get template_id for storage path)
-    const { template_id } = await this.repository.createWithNewSchema(
-      organizationId,
-      userId,
-      {
-        title: dto.title.trim(),
-        category_id: dto.category_id,
-        subcategory_id: dto.subcategory_id,
+    let template_id: string;
+    try {
+      const result = await this.repository.createWithNewSchema(
+        organizationId,
+        userId,
+        {
+          title: trimmedTitle,
+          category_id: dto.category_id,
+          subcategory_id: dto.subcategory_id,
+        }
+      );
+      template_id = result.template_id;
+    } catch (error: any) {
+      // Handle constraint violations
+      if (error?.code === '23514' || error?.message?.includes('files_path_chk')) {
+        const { handleStoragePathConstraintError } = await import('../../lib/storage/path-validator.js');
+        throw handleStoragePathConstraintError(error, 'unknown', organizationId, undefined);
       }
-    );
+      throw error;
+    }
 
     let fileId: string | null = null;
     let storagePath: string | null = null;
 
     try {
-      // Step 2: Generate storage path using template_id
-      const secureFilename = generateSecureFilename(validatedMimetype);
-      storagePath = `certificate_templates/${organizationId}/${template_id}/v0001/source/${secureFilename}`;
+      // Step 2: Generate canonical storage path using template_id
+      const { generateTemplateSourcePath, getExtensionFromMimeType } = await import('../../lib/storage/path-validator.js');
+      const extension = getExtensionFromMimeType(validatedMimetype);
+      storagePath = generateTemplateSourcePath(organizationId, template_id, 1, extension);
 
       // Step 3: Upload file to storage
       const { error: uploadError } = await supabase.storage
@@ -460,34 +488,54 @@ export class TemplateService {
         normalizedPages = { page_count: pageCount };
       }
 
-      // Step 5: Create file registry entry
-      const { file_id } = await this.repository.createFileEntry(
-        organizationId,
-        userId,
-        {
-          bucket: 'authentix',
-          path: storagePath,
-          kind: 'template_source',
-          original_name: sanitizeClientFilename(file.originalname),
-          mime_type: validatedMimetype,
-          size_bytes: file.buffer.length,
-          checksum_sha256: checksum,
+      // Step 5: Create file registry entry (with path validation)
+      let file_id: string;
+      try {
+        const result = await this.repository.createFileEntry(
+          organizationId,
+          userId,
+          {
+            bucket: 'authentix',
+            path: storagePath,
+            kind: 'template_source',
+            original_name: sanitizeClientFilename(file.originalname),
+            mime_type: validatedMimetype,
+            size_bytes: file.buffer.length,
+            checksum_sha256: checksum,
+          }
+        );
+        file_id = result.file_id;
+        fileId = file_id;
+      } catch (error: any) {
+        // Handle constraint violations with detailed error
+        if (error?.code === '23514' || error?.message?.includes('files_path_chk')) {
+          const { handleStoragePathConstraintError } = await import('../../lib/storage/path-validator.js');
+          throw handleStoragePathConstraintError(error, storagePath, organizationId, template_id);
         }
-      );
-
-      fileId = file_id;
+        throw error;
+      }
 
       // Step 6: Create template version
-      const { version_id } = await this.repository.createTemplateVersion(
-        template_id,
-        {
-          version_number: 1,
-          source_file_id: file_id,
-          page_count: pageCount,
-          normalized_pages: normalizedPages,
-          preview_file_id: null, // Will be generated in Step 5
+      let version_id: string;
+      try {
+        const result = await this.repository.createTemplateVersion(
+          template_id,
+          {
+            version_number: 1,
+            source_file_id: file_id,
+            page_count: pageCount,
+            normalized_pages: normalizedPages,
+            preview_file_id: null, // Will be generated later
+          }
+        );
+        version_id = result.version_id;
+      } catch (error: any) {
+        // If version creation fails, cleanup file entry
+        if (fileId) {
+          await this.repository.deleteFile(fileId);
         }
-      );
+        throw error;
+      }
 
       // Step 7: Update template latest_version_id
       await this.repository.updateLatestVersion(template_id, version_id);

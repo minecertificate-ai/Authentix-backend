@@ -149,8 +149,22 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const categoryIdField = data.fields?.category_id;
         const subcategoryIdField = data.fields?.subcategory_id;
 
-        if (!titleField || !('value' in titleField) || !titleField.value) {
+        // Validate title (required, trimmed)
+        let title: string;
+        if (titleField && 'value' in titleField && titleField.value) {
+          title = String(titleField.value).trim();
+        } else {
           sendError(reply, 'VALIDATION_ERROR', 'Title is required', 400);
+          return;
+        }
+
+        // Validate title length
+        if (title.length === 0) {
+          sendError(reply, 'VALIDATION_ERROR', 'Title is required', 400);
+          return;
+        }
+        if (title.length > 255) {
+          sendError(reply, 'VALIDATION_ERROR', 'Title must be 255 characters or less', 400);
           return;
         }
 
@@ -164,15 +178,8 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           return;
         }
 
-        const title = String(titleField.value).trim();
         const categoryId = String(categoryIdField.value).trim();
         const subcategoryId = String(subcategoryIdField.value).trim();
-
-        // Validate title length
-        if (title.length === 0 || title.length > 255) {
-          sendError(reply, 'VALIDATION_ERROR', 'Title must be between 1 and 255 characters', 400);
-          return;
-        }
 
         // Validate UUIDs
         const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -234,15 +241,37 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
 
           sendError(reply, errorCode, error.message, 400, error.details);
         } else {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to create template';
-          request.log.error({
-            userId,
+          // Handle storage path constraint errors
+          const { handleStoragePathConstraintError } = await import('../../lib/storage/path-validator.js');
+          const constraintError = handleStoragePathConstraintError(
+            error,
+            (error as any)?.attempted_path || 'unknown',
             organizationId,
-            error: errorMessage,
-            duration_ms: duration,
-          }, '[POST /templates] Failed to create template');
+            (error as any)?.template_id
+          );
 
-          sendError(reply, 'INTERNAL_ERROR', errorMessage, 500);
+          if (constraintError instanceof ValidationError) {
+            request.log.warn({
+              userId,
+              organizationId,
+              error: constraintError.message,
+              error_code: constraintError.details?.code,
+              attempted_path: constraintError.details?.attempted_path,
+              duration_ms: duration,
+            }, '[POST /templates] Storage path constraint violation');
+
+            sendError(reply, constraintError.details?.code as string || 'STORAGE_PATH_ERROR', constraintError.message, 400, constraintError.details);
+          } else {
+            const errorMessage = error instanceof Error ? error.message : 'Failed to create template';
+            request.log.error({
+              userId,
+              organizationId,
+              error: errorMessage,
+              duration_ms: duration,
+            }, '[POST /templates] Failed to create template');
+
+            sendError(reply, 'INTERNAL_ERROR', errorMessage, 500);
+          }
         }
       }
     }
