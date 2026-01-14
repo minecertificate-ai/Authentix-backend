@@ -39,6 +39,45 @@ export class ConflictError extends Error {
 }
 
 /**
+ * Helper to log PostgREST schema mismatches (stale schema cache / missing columns)
+ *
+ * Usage:
+ *   if (error && (error as any).code === 'PGRST204') {
+ *     logSchemaMismatch(request.log, {
+ *       endpoint: request.url,
+ *       method: 'UserRepository.getProfile',
+ *       table: 'profiles',
+ *       column: '...'
+ *     }, error);
+ *   }
+ */
+export function logSchemaMismatch(
+  logger: { warn: (obj: Record<string, unknown>, msg?: string) => void },
+  context: {
+    endpoint: string;
+    method: string;
+    table?: string;
+    column?: string;
+  },
+  error: unknown
+): void {
+  const err = error as any;
+  const code = err?.code;
+
+  logger.warn(
+    {
+      ...context,
+      code,
+      message: err?.message,
+      details: err?.details,
+      hint: err?.hint,
+      reminder: "If this is a PostgREST schema-cache error (PGRST204), run: NOTIFY pgrst, 'reload schema';",
+    },
+    '[Schema Mismatch] Potential PostgREST schema-cache mismatch detected'
+  );
+}
+
+/**
  * Error handler middleware
  */
 export async function errorHandler(

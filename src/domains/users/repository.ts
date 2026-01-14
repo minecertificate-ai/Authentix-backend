@@ -29,7 +29,7 @@ export class UserRepository {
       return null;
     }
 
-    // Get active organization membership
+    // Get active organization membership (with organization + logo file info)
     const { data: membership, error: memberError } = await this.supabase
       .from('organization_members')
       .select(`
@@ -45,7 +45,12 @@ export class UserRepository {
           application_id,
           billing_status,
           industry_id,
-          logo_file_id
+          logo_file_id,
+          logo_file:logo_file_id (
+            id,
+            bucket,
+            path
+          )
         ),
         organization_roles:role_id (
           id,
@@ -72,15 +77,26 @@ export class UserRepository {
       last_name: profile.last_name,
       full_name: fullName,
       organization: membership
-        ? {
-            id: (membership as any).organizations.id,
-            name: (membership as any).organizations.name,
-            slug: (membership as any).organizations.slug,
-            application_id: (membership as any).organizations.application_id,
-            billing_status: (membership as any).organizations.billing_status,
-            industry_id: (membership as any).organizations.industry_id,
-            logo_file_id: (membership as any).organizations.logo_file_id ?? null,
-          }
+        ? (() => {
+            const org = (membership as any).organizations;
+            const logoFile = org?.logo_file;
+
+            return {
+              id: org.id,
+              name: org.name,
+              slug: org.slug,
+              application_id: org.application_id,
+              billing_status: org.billing_status,
+              industry_id: org.industry_id,
+              logo: logoFile
+                ? {
+                    file_id: logoFile.id,
+                    bucket: logoFile.bucket,
+                    path: logoFile.path,
+                  }
+                : null,
+            };
+          })()
         : null,
       membership: membership
         ? {

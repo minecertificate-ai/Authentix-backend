@@ -61,7 +61,17 @@ export class DashboardRepository {
   async getRecentImports(organizationId: string, limit: number = 5): Promise<RecentImport[]> {
     const { data, error } = await this.supabase
       .from('file_import_jobs')
-      .select('id, file_name, status, total_rows, created_at')
+      .select(`
+        id,
+        status,
+        row_count,
+        created_at,
+        source_file:source_file_id (
+          id,
+          original_name,
+          path
+        )
+      `)
       .eq('organization_id', organizationId)
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -70,7 +80,16 @@ export class DashboardRepository {
       throw new Error(`Failed to fetch recent imports: ${error.message}`);
     }
 
-    return (data ?? []) as RecentImport[];
+    return (data ?? []).map((item: any) => ({
+      id: item.id,
+      // Derive display name from file metadata; fall back to path if original_name is missing
+      file_name: item.source_file
+        ? (item.source_file.original_name || item.source_file.path || null)
+        : null,
+      status: item.status,
+      total_rows: item.row_count ?? 0,
+      created_at: item.created_at,
+    })) as RecentImport[];
   }
 
   /**

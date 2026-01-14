@@ -4,8 +4,9 @@
 
 ### Fixed - Schema Mismatches in User Profile and Dashboard Endpoints
 - **Root cause:** Code was using old database schema columns/tables that no longer exist:
-  - `organizations.logo` (removed) → should use `organizations.logo_file_id`
+  - `organizations.logo` (removed) → should use `organizations.logo_file_id` + join `files`
   - `verification_logs` table (removed) → should use `certificate_verification_events`
+  - `file_import_jobs.file_name` (removed) → should join `files` via `source_file_id`
   - `import_jobs` table (removed) → should use `file_import_jobs`
   - `company_id` column → should use `organization_id`
   - Missing organization fields: `application_id`, `billing_status`, `industry_id`
@@ -13,26 +14,38 @@
 - **Fixes:**
   - **`GET /api/v1/users/me` (UserRepository.getProfile):**
     - Removed `organizations.logo` selection (column doesn't exist)
-    - Added `organizations.logo_file_id` to response (nullable)
+    - Added join to `files` table via `organizations.logo_file_id` to fetch logo metadata
+    - Returns stable logo object: `{ file_id, bucket, path }` or `null` if no logo
     - Added `organizations.application_id`, `billing_status`, `industry_id` to response
     - Updated membership query to include `role_id` and join `organization_roles` for `role_key`
-    - Updated `UserProfile` type to match new schema contract
-    - Response now includes: `profile`, `organization` (with all new fields), `role` (from `membership.role_key`)
+    - Updated `UserProfile` type to match new schema contract with nested logo object
+    - Response now includes: `profile`, `organization` (with logo object and all new fields), `role` (from `membership.role_key`)
   
   - **`GET /api/v1/dashboard/stats` (DashboardRepository):**
-    - Replaced `verification_logs` with `certificate_verification_events` table
-    - Changed `verified_at` → `scanned_at` (new column name)
-    - Replaced `import_jobs` with `file_import_jobs` table
-    - Changed `company_id` → `organization_id` throughout
-    - Removed soft-delete filters (new schema doesn't use `deleted_at` on certificates)
-    - Updated `getRecentVerifications` to join `certificates` and return `certificate_number` instead of `course_name`
-    - Updated `RecentVerification` type to match new schema
+    - **Recent Verifications:**
+      - Replaced `verification_logs` with `certificate_verification_events` table
+      - Changed `verified_at` → `scanned_at` (new column name)
+      - Join `certificates` to get `recipient_name` and `certificate_number`
+      - Returns same shape as UI expects (recent list + counts)
+    
+    - **Recent Imports:**
+      - Removed `file_import_jobs.file_name` selection (column doesn't exist)
+      - Added join to `files` table via `file_import_jobs.source_file_id`
+      - Derives `file_name` from `files.original_name` (fallback to `files.path`)
+      - Changed `total_rows` → `row_count` (matches new schema)
+      - Returns same shape as UI expects
+    
+    - **General:**
+      - Changed `company_id` → `organization_id` throughout
+      - Removed soft-delete filters (new schema doesn't use `deleted_at` on certificates)
+      - Updated `RecentVerification` and `RecentImport` types to match new schema
   
   - **Dashboard Service Resilience:**
     - Made `getDashboardData` resilient to partial failures
     - If `getStats`, `getRecentImports`, or `getRecentVerifications` fail, endpoint still returns 200 with partial data
     - Failed components default to empty arrays/zeros instead of causing 500 errors
     - Logs component failures without breaking the entire response
+    - Endpoint returns 200 even if there are 0 imports/verifications
   
   - **Verification Service:**
     - Updated `logVerification` to write to `certificate_verification_events` instead of `verification_logs`
@@ -40,19 +53,27 @@
     - Changed `verified_at` → `scanned_at`
     - Changed `verifier_ip` → `ip_hash` (matches new schema)
 
+  - **Schema Mismatch Log Helper:**
+    - Added `logSchemaMismatch()` helper function in `src/lib/errors/handler.ts`
+    - Logs endpoint, repository method, table, column, and PostgREST error details
+    - Includes reminder: "If this is a PostgREST schema-cache error (PGRST204), run: NOTIFY pgrst, 'reload schema';"
+    - Can be used in repositories/endpoints when catching PostgREST schema-cache errors
+
 - **Files changed:**
-  - `src/domains/users/repository.ts`: Updated query to use new schema, removed `logo`, added new org fields
-  - `src/domains/users/types.ts`: Updated `UserProfile` interface to match new schema
-  - `src/domains/dashboard/repository.ts`: Replaced old tables/columns with new schema equivalents
+  - `src/domains/users/repository.ts`: Updated query to join `files` for logo, removed `logo`, added new org fields
+  - `src/domains/users/types.ts`: Updated `UserProfile` interface with nested logo object structure
+  - `src/domains/dashboard/repository.ts`: Replaced old tables/columns, added `files` join for imports
   - `src/domains/dashboard/types.ts`: Updated `RecentVerification` type to use `certificate_number`
   - `src/domains/dashboard/service.ts`: Added error handling for partial failures
   - `src/domains/verification/service.ts`: Updated to use `certificate_verification_events`
+  - `src/lib/errors/handler.ts`: Added `logSchemaMismatch()` helper for PostgREST schema-cache errors
 
 - **Verification:**
-  - `/api/v1/users/me` now returns 200 with complete organization and membership data
+  - `/api/v1/users/me` now returns 200 with complete organization (including logo object) and membership data
   - `/api/v1/dashboard/stats` returns 200 even with empty tables or partial component failures
   - All queries use correct table/column names matching `DATABASE_DOCUMENTATION_DETAILED.md`
-  - No remaining references to `organizations.logo` or `verification_logs` in runtime code
+  - No remaining references to `organizations.logo`, `verification_logs`, or `file_import_jobs.file_name` in runtime code
+  - Project-wide search confirms all legacy schema references removed from `src/` directory
 
 ## 2026-01-13
 

@@ -17,7 +17,11 @@ export interface UserProfile {
     application_id: string;
     billing_status: string;
     industry_id: string | null;
-    logo_file_id: string | null;
+    logo: {
+      file_id: string;
+      bucket: string;
+      path: string;
+    } | null;
   } | null;
   membership: {
     id: string;
