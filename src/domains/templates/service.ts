@@ -41,18 +41,17 @@ export class TemplateService {
       sortOrder?: 'asc' | 'desc';
       includePreviewUrl?: boolean;
     } = {}
-  ): Promise<{ templates: TemplateEntity[]; total: number; previews?: Array<{ template_id: string; preview_file: any | null }> }> {
+  ): Promise<{ templates: TemplateEntity[]; total: number }> {
     const limit = options.limit ?? 20;
     const page = options.page ?? 1;
     const offset = (page - 1) * limit;
 
-    const { data, count, previews } = await this.repository.findAll(organizationId, {
+    const { data, count } = await this.repository.findAll(organizationId, {
       status: options.status,
       limit,
       offset,
       sortBy: options.sortBy,
       sortOrder: options.sortOrder,
-      includePreview: options.includePreviewUrl,
     });
 
     // If includePreviewUrl is requested, batch generate signed URLs for legacy templates
@@ -62,14 +61,12 @@ export class TemplateService {
       return {
         templates: templatesWithUrls,
         total: count,
-        previews,
       };
     }
 
     return {
       templates: data,
       total: count,
-      previews,
     };
   }
 
@@ -145,13 +142,6 @@ export class TemplateService {
       console.error('Error batch generating signed URLs:', error);
       return templates; // Fallback to existing URLs
     }
-
-    // If previews were included, attach them to response
-    if (options.includePreviewUrl && previews) {
-      return { templates, total: count, previews };
-    }
-
-    return { templates, total: count };
   }
 
   /**
@@ -369,7 +359,7 @@ export class TemplateService {
     const { computeSHA256 } = await import('../../lib/uploads/checksum.js');
     const { getPDFPageCount } = await import('../../lib/uploads/pdf-utils.js');
     const { validateFileUpload } = await import('../../lib/uploads/validator.js');
-    const { generateSecureFilename, sanitizeClientFilename } = await import('../../lib/uploads/filename.js');
+    const { sanitizeClientFilename } = await import('../../lib/uploads/filename.js');
     const supabase = getSupabaseClient();
     const catalogRepo = new CatalogRepository(supabase);
 
@@ -463,7 +453,7 @@ export class TemplateService {
       // Step 2: Generate canonical storage path using template_id
       const { generateTemplateSourcePath, getExtensionFromMimeType } = await import('../../lib/storage/path-validator.js');
       const extension = getExtensionFromMimeType(validatedMimetype);
-      storagePath = generateTemplateSourcePath(organizationId, template_id, 1, extension);
+      storagePath = generateTemplateSourcePath(organizationId, template_id, extension);
 
       // Step 3: Upload file to storage
       const { error: uploadError } = await supabase.storage
@@ -581,26 +571,48 @@ export class TemplateService {
         throw new Error(`Failed to fetch file data: ${fileFetchError?.message || 'No data returned'}`);
       }
 
+      // Type assertions for Supabase response
+      type TemplateRow = {
+        id: string;
+        title: string;
+        status: string;
+        category_id: string;
+        subcategory_id: string;
+        latest_version_id: string | null;
+        created_at: string;
+      };
+
+      type FileRow = {
+        id: string;
+        bucket: string;
+        path: string;
+        mime_type: string;
+        size_bytes: number;
+      };
+
+      const typedTemplateData = templateData as TemplateRow;
+      const typedFileData = fileData as FileRow;
+
       return {
         template: {
-          id: templateData.id,
-          title: templateData.title,
-          status: templateData.status,
-          category_id: templateData.category_id,
-          subcategory_id: templateData.subcategory_id,
-          latest_version_id: templateData.latest_version_id,
-          created_at: templateData.created_at,
+          id: typedTemplateData.id,
+          title: typedTemplateData.title,
+          status: typedTemplateData.status,
+          category_id: typedTemplateData.category_id,
+          subcategory_id: typedTemplateData.subcategory_id,
+          latest_version_id: typedTemplateData.latest_version_id,
+          created_at: typedTemplateData.created_at,
         },
         version: {
           id: version_id,
           version_number: 1,
           page_count: pageCount,
           source_file: {
-            id: fileData.id,
-            bucket: fileData.bucket,
-            path: fileData.path,
-            mime_type: fileData.mime_type,
-            size_bytes: fileData.size_bytes,
+            id: typedFileData.id,
+            bucket: typedFileData.bucket,
+            path: typedFileData.path,
+            mime_type: typedFileData.mime_type,
+            size_bytes: typedFileData.size_bytes,
           },
         },
       };
@@ -693,6 +705,11 @@ export class TemplateService {
     const fieldKeys = new Set<string>();
     for (let i = 0; i < dto.fields.length; i++) {
       const field = dto.fields[i];
+      if (!field) {
+        throw new ValidationError(`Field at index ${i} is missing`, {
+          field: `fields[${i}]`,
+        });
+      }
       const fieldPath = `fields[${i}]`;
 
       // Validate field_key uniqueness
@@ -829,11 +846,17 @@ export class TemplateService {
         .single();
 
       if (previewFile) {
+        type PreviewFileRow = {
+          id: string;
+          bucket: string;
+          path: string;
+        };
+        const typedPreviewFile = previewFile as PreviewFileRow;
         return {
           status: 'already_exists',
-          preview_file_id: previewFile.id,
-          preview_bucket: previewFile.bucket,
-          preview_path: previewFile.path,
+          preview_file_id: typedPreviewFile.id,
+          preview_bucket: typedPreviewFile.bucket,
+          preview_path: typedPreviewFile.path,
         };
       }
     }
@@ -844,7 +867,6 @@ export class TemplateService {
       organizationId: versionInfo.template.organization_id,
       templateId,
       versionId,
-      versionNumber: versionInfo.version.version_number,
     });
 
     // Create audit log

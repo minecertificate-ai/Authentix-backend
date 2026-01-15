@@ -12,7 +12,6 @@ export interface PreviewGenerationOptions {
   organizationId: string;
   templateId: string;
   versionId: string;
-  versionNumber: number;
 }
 
 export interface PreviewGenerationResult {
@@ -40,7 +39,7 @@ export async function generateTemplatePreview(
   supabase: SupabaseClient,
   options: PreviewGenerationOptions
 ): Promise<PreviewGenerationResult> {
-  const { organizationId, templateId, versionId, versionNumber } = options;
+  const { organizationId, templateId, versionId } = options;
 
   // Step 1: Check if preview already exists (idempotency)
   const { data: existingVersion, error: versionError } = await supabase
@@ -150,7 +149,6 @@ export async function generateTemplatePreview(
   const previewPath = generateTemplatePreviewPath(
     organizationId,
     templateId,
-    versionNumber,
     previewExtension === 'webp' ? 'webp' : previewExtension === 'png' ? 'png' : 'pdf'
   );
 

@@ -1,3 +1,467 @@
+# Authentix DB Handbook (Tables + Storage + RLS + Usage)
+
+Last updated: 2026-01-15  
+Applies to: Supabase Postgres (public schema) + Supabase Storage bucket `authentix`
+
+This handbook is meant to be **the single source of truth** for:
+- what each table is for (and what *not* to use it for),
+- how tables relate,
+- how RLS/policies are intended to work,
+- how Storage paths must be formed,
+- which table to query for each UI screen (“query cookbook”),
+- how categories/subcategories evolve over time (defaults + org overrides).
+
+> **Important**: Authentix uses Supabase Auth for passwords, login sessions, email verification, password reset flows.  
+> We **do not** store raw passwords in any public table.
+
+
+---
+
+## 0) Big picture: the system in 4 modules
+
+1) **Identity & Tenant**  
+   Organizations + members + roles + invitations + profiles.
+
+2) **Templates**  
+   Upload template file, generate preview, store template metadata.
+
+3) **Generate & Issue Certificates**  
+   Pick template → place fields → import recipients → generate → store certificates + verification artifacts.
+
+4) **Deliver & Bill**  
+   Send certificates via WhatsApp/email, track statuses, record usage, generate invoices.
+
+---
+
+## 1) Storage (Supabase bucket)
+
+### Bucket
+- **Bucket name**: `authentix` (private)
+- **Root folders currently used/expected**:
+  - `templates/`
+  - `imports/`
+  - `certificates/`
+  - `bundles/`
+  - `branding/`
+  - `deliveries/` (optional attachments)
+  - `invoices/` (PDF invoices)
+  - `exports/` (bulk exports)
+  - `profiles/` (avatars / user profile images)
+
+> **Rule of thumb**: storage is **organization-scoped** except user avatars (user-scoped).
+
+### Canonical rule: files are registered in DB
+All uploaded objects must have a corresponding row in **`public.files`**:
+- `files.bucket = 'authentix'`
+- `files.path = <storage path>`
+- `files.kind = enum` (template_source, template_preview, import_source, certificate_pdf, …)
+
+Other tables reference `files.id`, not raw bucket/path.
+
+### Path structure (final)
+Common folders are top-level; org folder is one level below:
+
+- **Templates**
+  - `templates/<org_id>/<template_id>/source.<ext>`
+  - `templates/<org_id>/<template_id>/preview.<ext>`
+- **Imports**
+  - `imports/<org_id>/<import_job_id>/source.<ext>`
+- **Certificates**
+  - `certificates/<org_id>/<certificate_id>/certificate.pdf`
+  - `certificates/<org_id>/<certificate_id>/preview.png`
+- **Bundles**
+  - `bundles/<org_id>/<bundle_id>/certificates.zip`
+- **Branding**
+  - `branding/<org_id>/logo/<file_id>.<ext>`
+  - `branding/<org_id>/signatures/<file_id>.<ext>`
+  - `branding/<org_id>/stamps/<file_id>.<ext>`
+- **Profiles (avatars)**
+  - `profiles/<user_id>/avatar/<file_id>.<ext>`
+
+✅ **Do**
+- Always use these prefixes so `files_path_chk` & storage RLS work.
+- Keep `<org_id>` and `<user_id>` as UUIDs.
+
+❌ **Don’t**
+- Don’t store “version folders” unless you explicitly support versioning UX.
+  In Authentix requirement: templates are replaced by “upload new + delete old”, so version folders are **not needed**.
+
+---
+
+## 2) Entity Relationship Diagram (Mermaid)
+
+```mermaid
+erDiagram
+  organizations ||--o{ organization_members : has
+  profiles ||--o{ organization_members : joins
+  organizations ||--o{ organization_roles : defines
+  organization_roles ||--o{ role_permissions : grants
+  organizations ||--o{ organization_invitations : invites
+
+  industries ||--o{ organizations : classifies
+  industries ||--o{ certificate_categories : provides
+
+  certificate_categories ||--o{ certificate_subcategories : contains
+  organizations ||--o{ organization_category_overrides : overrides
+  organizations ||--o{ organization_subcategory_overrides : overrides
+
+  organizations ||--o{ files : owns
+
+  organizations ||--o{ certificate_templates : owns
+  certificate_templates ||--o{ certificate_template_versions : versions
+  certificate_template_versions ||--o{ certificate_template_fields : fields
+  files ||--o{ certificate_template_versions : source_preview
+
+  organizations ||--o{ file_import_jobs : owns
+  file_import_jobs ||--o{ file_import_rows : rows
+  files ||--o{ file_import_jobs : source_file
+
+  organizations ||--o{ certificate_generation_jobs : owns
+  certificate_generation_jobs ||--o{ generation_job_recipients : recipients
+  certificate_generation_jobs ||--o{ generation_job_templates : used_templates
+
+  certificate_generation_jobs ||--o{ certificates : produces
+  certificate_templates ||--o{ certificates : used_for
+  certificate_template_versions ||--o{ certificates : rendered_from
+  files ||--o{ certificates : pdf_preview
+
+  organizations ||--o{ delivery_integrations : has
+  delivery_integrations ||--|| delivery_integration_secrets : stores_secrets
+  organizations ||--o{ delivery_templates : uses
+  organizations ||--o{ delivery_messages : sends
+  delivery_messages ||--o{ delivery_message_items : includes
+  delivery_provider_webhook_events }o--|| organizations : receives
+
+  organizations ||--o{ billing_periods : bills
+  billing_periods ||--o{ billing_usage_events : aggregates
+  organizations ||--o{ billing_invoices : invoices
+  billing_invoices ||--o{ billing_invoice_items : lines
+```
+
+---
+
+## 3) Query Cookbook (which table/view for which screen)
+
+### Auth & Onboarding
+- **Signup / Login / Verification**: Supabase Auth (`auth.users`) + backend bootstrap.
+- **Post-login bootstrap** (create org/membership/roles): writes to  
+  `profiles`, `organizations`, `organization_roles`, `organization_members`, `app_audit_logs`.
+
+### Dashboard home (stats)
+- **Fast stats**: `dashboard_stats_cache` (precomputed)  
+  fallback to counting:
+  - templates: `certificate_templates` (non-deleted)
+  - certificates: `certificates`
+  - imports: `file_import_jobs`
+  - verifications: `certificate_verification_events`
+
+### Templates list page
+Use **`v_templates_list`** (preferred) to avoid N+1 joins.
+- Shows: title, status, category/subcategory names, latest preview path.
+- Delete: soft delete in `certificate_templates` + cleanup `files` rows (and optionally storage objects).
+
+### Template upload dialog
+Write sequence:
+1) Upload storage object(s) → create `files` rows (source + preview)  
+2) Create `certificate_templates` row  
+3) Create `certificate_template_versions` row  
+4) Create `certificate_template_fields` rows (later, after designer)
+
+### Generate certificate flow
+- List selectable templates: `v_templates_list` filtered by status=active and deleted_at is null
+- “Recently used” templates: derived from `certificate_generation_jobs` / `generation_job_templates`
+- Field placement: reads/writes `certificate_template_fields` for the chosen `template_version_id`
+- Import recipients:
+  - create job: `file_import_jobs`
+  - rows: `file_import_rows`
+  - recipients normalization: `generation_job_recipients`
+- Generate:
+  - create `certificate_generation_jobs`
+  - create `certificates`
+  - store pdf/preview in `files`, link into `certificates`
+
+### Certificate list
+Use **`v_certificates_list`** (preferred) for display, plus filters.
+
+### Certificate verification public page
+Use **`v_certificate_verification`** (single view, no backend join logic).
+
+### Delivery (email / WhatsApp) status UI
+- Integration config list: `delivery_integrations` (non-deleted)
+- Templates for delivery messages: `delivery_templates`
+- Outbound queue/status: `delivery_messages` + `delivery_message_items`
+- Webhook logs: `delivery_provider_webhook_events`
+
+### Billing UI
+- Current month pricing: `get_org_effective_pricing()` or `organization_pricing_overrides` + defaults in `organizations`
+- Periods: `billing_periods`
+- Usage: `billing_usage_events`
+- Invoices: `billing_invoices` + `billing_invoice_items`
+- Payments: `billing_orders`, `billing_payments`, `billing_refunds`
+- Provider events: `billing_provider_events_safe` for UI, raw in `billing_provider_events`
+
+---
+
+## 4) Table-by-table reference (Purpose + Do/Don't)
+
+Below are the **tables you will touch most often**.
+For each table:
+- **Purpose**
+- **Stores**
+- **Relations**
+- ✅ Do
+- ❌ Don’t
+
+---
+
+### organizations
+
+**Purpose**: the tenant record (one org/company).
+
+**Stores**
+- Identity: `name`, `legal_name`, `email`, `phone`, address fields, `website_url`, `tax_id`, `gstin`
+- Tenant identifiers: `application_id` (public-ish), `api_key_hash` (never store raw key)
+- Certificate numbering: `certificate_prefix`, `certificate_seq`, `certificate_number_format`
+- Billing baseline: `billing_status`, trial fields, default prices, invoice sequence fields
+- Branding reference: `logo_file_id` (FK → `files`)
+- Industry: `industry_id` (FK → `industries`)
+
+**Relations**
+- 1 org → many: templates, certificates, imports, deliveries, billing rows, files, members
+
+✅ **Do**
+- Generate `api_key_hash` server-side only (store hash, return raw key once to user).
+- Use `industry_id` to drive default categories.
+- Use `next_certificate_number()` RPC to avoid race conditions.
+
+❌ **Don’t**
+- Don’t expose `api_key_hash` or any secret fields to client.
+- Don’t compute certificate numbers in frontend.
+
+---
+
+### profiles
+
+**Purpose**: app-level user profile for an auth user (non-sensitive).
+
+**Stores**
+- `id` = auth uid
+- `first_name`, `last_name`, `email`
+- timestamps + soft delete
+
+**Avatar**
+- Storage: `profiles/<user_id>/avatar/<file_id>.<ext>`
+- Future DB: add `profiles.avatar_file_id → files.id`
+
+✅ **Do**
+- Treat this as display/profile metadata only.
+
+❌ **Don’t**
+- Don’t store passwords or tokens here.
+
+---
+
+### organization_roles
+
+**Purpose**: roles within an organization (owner/admin/member + custom roles).
+
+**Stores**
+- `organization_id`, `key`, `name`, `is_system` (seeded roles)
+
+✅ **Do**
+- Ensure `is_system` exists with default false; seed owner/admin/member with `true`.
+
+❌ **Don’t**
+- Don’t hardcode role IDs in code; look up by `key`.
+
+---
+
+### role_permissions
+
+**Purpose**: permission matrix per role.
+
+✅ **Do**
+- Enforce permissions server-side for privileged actions.
+
+❌ **Don’t**
+- Don’t rely on frontend-only gating.
+
+---
+
+### organization_members
+
+**Purpose**: membership mapping (user ↔ org) including role.
+
+**Stores**
+- `organization_id`, `user_id`, `role_id`, `status`, `username`
+
+✅ **Do**
+- Use this to derive the “current org” and enforce RLS membership checks.
+- Use `status='active'` + `deleted_at is null` in checks.
+
+❌ **Don’t**
+- Don’t store role names here; join to `organization_roles`.
+
+---
+
+### organization_invitations
+
+**Purpose**: invite flow to add members.
+
+✅ **Do**
+- Store only `token_hash` (never raw token).
+
+---
+
+### industries
+
+**Purpose**: industry taxonomy.
+
+✅ **Do**
+- Keep global and stable.
+
+---
+
+### certificate_categories
+
+**Purpose**: base categories (industry defaults) + optional org-defined categories.
+
+**Stores**
+- `industry_id` (required for base)
+- `organization_id` (optional for org custom)
+- `key`, `name`, `group_key`, `sort_order`
+
+✅ **Do**
+- Use `v_effective_categories` for UI.
+
+❌ **Don’t**
+- Don’t duplicate category names in templates; store IDs.
+
+---
+
+### certificate_subcategories
+
+**Purpose**: base subcategories + optional org-defined subcategories.
+
+✅ **Do**
+- Use `v_effective_subcategories` for UI.
+
+---
+
+### organization_category_overrides
+
+**Purpose**: org rename/hide/reorder of base categories.
+
+✅ **Do**
+- Use overrides instead of editing base categories.
+
+---
+
+### organization_subcategory_overrides
+
+**Purpose**: org rename/hide/reorder of base subcategories.
+
+---
+
+### certificate_templates
+
+**Purpose**: one uploaded design record.
+
+✅ **Do**
+- After successful upload, set `status='active'`.
+
+❌ **Don’t**
+- Don’t implement reupload/version UX unless product adds it.
+
+---
+
+### certificate_template_versions
+
+**Purpose**: technical version artifact pointer.
+
+✅ **Do**
+- Keep version table even if UX doesn’t show versions.
+
+---
+
+### certificate_template_fields
+
+**Purpose**: field placements for designer & generation.
+
+---
+
+### files
+
+**Purpose**: canonical registry for storage objects.
+
+✅ **Do**
+- Enforce path rules; never store signed URLs.
+
+---
+
+### file_import_jobs / file_import_rows
+
+**Purpose**: import source and parsed rows.
+
+✅ **Do**
+- Use `files.original_name` rather than adding file_name columns.
+
+---
+
+### certificate_generation_jobs / generation_job_templates / generation_job_recipients
+
+**Purpose**: capture generation runs and allow “recently used templates”.
+
+---
+
+### certificates / certificate_verification_events
+
+**Purpose**: issued certificates + verification analytics.
+
+---
+
+### delivery_* tables
+
+**Purpose**: provider config, templates, messages, webhook logs.
+
+---
+
+### app_audit_logs / dashboard_stats_cache
+
+**Purpose**: audit + fast dashboard.
+
+---
+
+### billing_* tables
+
+**Purpose**: pricing, periods, usage, invoices, payments.
+
+---
+
+## 5) RLS & Security model (high level)
+
+- Most org-owned tables should allow access only to authenticated users who are active org members.
+- Secrets are never exposed client-side.
+
+---
+
+## 6) Category/Subcategory future plan
+
+✅ **Do**
+- Keep base categories per industry.
+- Apply org overrides for naming/hiding/reordering.
+- If adding org-defined categories later, insert into base tables with `organization_id=<org>`.
+
+❌ **Don’t**
+- Don’t hardcode categories in frontend.
+
+---
+
+## Appendix A — Complete DB snapshot (verbatim)
+
+The following section is the raw extracted DB inventory you provided:
+
+```markdown
 # AUTHENTIX DATABASE + STORAGE DOCUMENTATION (COMPLETE)
 
 Last updated: 2026-01-15
@@ -9227,4 +9691,6 @@ BEGIN
   WHERE s.id = secret_id;
 END
 $function$
+```
+
 ```

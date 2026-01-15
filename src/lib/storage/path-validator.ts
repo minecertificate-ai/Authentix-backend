@@ -96,18 +96,16 @@ export function validateStoragePath(path: string, expectedRoot?: StorageRoot): v
 
 /**
  * Generate canonical template source file path
- * Format: certificate_templates/<org_id>/<template_id>/v{version_padded}/source.<ext>
- * 
+ * Format: certificate_templates/<org_id>/<template_id>/source.<ext>
+ *
  * @param organizationId - Organization UUID
  * @param templateId - Template UUID
- * @param versionNumber - Version number (1, 2, 3, ...)
  * @param extension - File extension (without dot)
  * @returns Validated storage path
  */
 export function generateTemplateSourcePath(
   organizationId: string,
   templateId: string,
-  versionNumber: number,
   extension: string
 ): string {
   // Validate UUIDs
@@ -125,14 +123,6 @@ export function generateTemplateSourcePath(
     });
   }
 
-  // Validate version number
-  if (!Number.isInteger(versionNumber) || versionNumber < 1) {
-    throw new ValidationError('Version number must be a positive integer', {
-      code: 'INVALID_VERSION_NUMBER',
-      versionNumber,
-    });
-  }
-
   // Validate extension
   if (!extension || typeof extension !== 'string' || extension.includes('/') || extension.includes('.')) {
     throw new ValidationError('Invalid file extension', {
@@ -142,8 +132,7 @@ export function generateTemplateSourcePath(
   }
 
   // Generate path
-  const versionPadded = `v${versionNumber.toString().padStart(4, '0')}`;
-  const path = `certificate_templates/${organizationId}/${templateId}/${versionPadded}/source.${extension}`;
+  const path = `certificate_templates/${organizationId}/${templateId}/source.${extension}`;
 
   // Validate generated path
   validateStoragePath(path, 'certificate_templates');
@@ -153,18 +142,16 @@ export function generateTemplateSourcePath(
 
 /**
  * Generate canonical template preview file path
- * Format: certificate_templates/<org_id>/<template_id>/v{version_padded}/preview.webp
- * 
+ * Format: certificate_templates/<org_id>/<template_id>/preview.<format>
+ *
  * @param organizationId - Organization UUID
  * @param templateId - Template UUID
- * @param versionNumber - Version number (1, 2, 3, ...)
  * @param format - Preview format ('webp' | 'png' | 'pdf')
  * @returns Validated storage path
  */
 export function generateTemplatePreviewPath(
   organizationId: string,
   templateId: string,
-  versionNumber: number,
   format: 'webp' | 'png' | 'pdf' = 'webp'
 ): string {
   // Validate UUIDs
@@ -182,17 +169,8 @@ export function generateTemplatePreviewPath(
     });
   }
 
-  // Validate version number
-  if (!Number.isInteger(versionNumber) || versionNumber < 1) {
-    throw new ValidationError('Version number must be a positive integer', {
-      code: 'INVALID_VERSION_NUMBER',
-      versionNumber,
-    });
-  }
-
   // Generate path
-  const versionPadded = `v${versionNumber.toString().padStart(4, '0')}`;
-  const path = `certificate_templates/${organizationId}/${templateId}/${versionPadded}/preview.${format}`;
+  const path = `certificate_templates/${organizationId}/${templateId}/preview.${format}`;
 
   // Validate generated path
   validateStoragePath(path, 'certificate_templates');
