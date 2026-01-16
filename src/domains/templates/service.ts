@@ -131,29 +131,23 @@ export class TemplateService {
           }
         } 
         
-        // Fallback: Use source file as preview if it's an image (for templates uploaded before preview generation was implemented)
-        // This is a temporary fallback - new templates should always have previews generated at upload time
+        // Fallback: Use source file as preview for images and PDFs
+        // This allows templates without dedicated previews to still be displayed
         if (!templateWithPreview.preview_file && templateWithPreview.source_file?.path && templateWithPreview.source_file?.bucket) {
           try {
             const sourceFile = templateWithPreview.source_file;
-            const imageMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-            
-            // Use source file as preview if it's an image (legacy templates only)
-            if (sourceFile.mime_type && imageMimeTypes.includes(sourceFile.mime_type)) {
-              console.log('[TemplateService.list] Using source file as preview (legacy fallback)', {
-                template_id: template.id,
-                source_file_mime_type: sourceFile.mime_type,
-                note: 'This template was uploaded before preview generation was implemented',
-              });
+            const previewableMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
+            // Use source file as preview for images and PDFs
+            if (sourceFile.mime_type && previewableMimeTypes.includes(sourceFile.mime_type)) {
               const previewUrl = await this.getPreviewUrlForPath(
                 sourceFile.bucket,
                 sourceFile.path
               );
-              
-              console.log('[TemplateService.list] Generated preview URL from source file (fallback)', {
+
+              console.log('[TemplateService.list] Using source file as preview (fallback)', {
                 template_id: template.id,
-                preview_url: previewUrl.substring(0, 50) + '...',
+                source_file_mime_type: sourceFile.mime_type,
               });
 
               return {
@@ -461,40 +455,36 @@ export class TemplateService {
   }
 
   /**
-   * Get signed URL for template preview
-   * Uses cache-first approach
+   * Get signed URL for template preview (new schema)
+   * Gets preview from latest version's preview_file
    */
   async getPreviewUrl(id: string, organizationId: string): Promise<string> {
-    const template = await this.getById(id, organizationId);
-
-    if (!template.storage_path) {
-      throw new NotFoundError('Template storage path not available');
+    const template = await this.repository.findById(id, organizationId);
+    if (!template) {
+      throw new NotFoundError('Template not found');
     }
 
-    // Check cache first
-    const cached = getCachedSignedUrl(template.storage_path);
-    if (cached) {
-      return cached;
+    const templateWithPreview = template as any;
+    
+    // Try to get preview from latest version's preview_file
+    if (templateWithPreview.preview_file?.path && templateWithPreview.preview_file?.bucket) {
+      return await this.getPreviewUrlForPath(
+        templateWithPreview.preview_file.bucket,
+        templateWithPreview.preview_file.path
+      );
     }
 
-    // Generate signed URL (expires in 1 hour)
-    const supabase = getSupabaseClient();
-    const { data, error } = await supabase.storage
-      .from('minecertificate')
-      .createSignedUrl(template.storage_path, 3600);
+    // Fallback: Use source file for images and PDFs
+    if (templateWithPreview.source_file?.path && templateWithPreview.source_file?.bucket) {
+      const sourceFile = templateWithPreview.source_file;
+      const previewableMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
-    if (error || !data) {
-      // Fallback to public URL if available
-      if (template.preview_url) {
-        return template.preview_url;
+      if (sourceFile.mime_type && previewableMimeTypes.includes(sourceFile.mime_type)) {
+        return await this.getPreviewUrlForPath(sourceFile.bucket, sourceFile.path);
       }
-      throw new Error('Failed to generate signed URL');
     }
 
-    // Cache the signed URL (expires in 3600 seconds)
-    setCachedSignedUrl(template.storage_path, data.signedUrl, 3600);
-
-    return data.signedUrl;
+    throw new NotFoundError('Template preview not available');
   }
 
   /**
@@ -860,46 +850,26 @@ export class TemplateService {
       // Step 7: Update template latest_version_id
       await this.repository.updateLatestVersion(template_id, version_id);
 
-      // Step 8: Auto-generate preview for images (synchronous for images, async for PDFs)
-      // This ensures preview URLs are available immediately when listing templates
-      try {
-        const imageMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-        
-        if (imageMimeTypes.includes(validatedMimetype)) {
-          console.log('[TemplateService.createWithNewSchema] Auto-generating preview for image template', {
-            template_id,
-            version_id,
-            mime_type: validatedMimetype,
-          });
+      // Step 8: Auto-generate preview for images and PDFs
+      // PDFs get first page extracted as preview (stored as PDF for iframe display)
+      // Images get used directly as preview
+      const previewableMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
-          // For images, generate preview immediately (it's just copying/resizing the file)
-          // This stores the preview_file_id in the version record for fast retrieval during list
+      if (previewableMimeTypes.includes(validatedMimetype)) {
+        try {
           const previewResult = await this.generatePreview(template_id, version_id, organizationId, userId);
-          
-          console.log('[TemplateService.createWithNewSchema] Preview generated and stored successfully', {
+          console.log('[TemplateService.createWithNewSchema] Preview generated', {
             template_id,
-            version_id,
             preview_file_id: previewResult.preview_file_id,
-            preview_path: previewResult.preview_path,
+            mime_type: previewResult.preview_mime_type,
           });
-        } else {
-          console.log('[TemplateService.createWithNewSchema] Skipping auto-preview generation for non-image file', {
+        } catch (previewError) {
+          // Non-fatal - template creation succeeds without preview
+          console.warn('[TemplateService.createWithNewSchema] Preview generation failed (non-fatal)', {
             template_id,
-            version_id,
-            mime_type: validatedMimetype,
-            note: 'Preview can be generated later via POST /templates/:templateId/versions/:versionId/preview',
+            error: previewError instanceof Error ? previewError.message : 'Unknown error',
           });
         }
-      } catch (previewError) {
-        // Preview generation failures are non-fatal - template creation should still succeed
-        // But log the error so it can be debugged
-        console.error('[TemplateService.createWithNewSchema] Failed to auto-generate preview (non-fatal)', {
-          template_id,
-          version_id,
-          error: previewError instanceof Error ? previewError.message : 'Unknown error',
-          error_stack: previewError instanceof Error ? previewError.stack : undefined,
-        });
-        // Template will be created without preview - user can generate it manually later
       }
 
       // Step 9: Create audit log
@@ -922,51 +892,37 @@ export class TemplateService {
         console.warn('[TemplateService.createWithNewSchema] Failed to create audit log:', auditError);
       }
 
-      // Fetch created template for response
-      console.log('[TemplateService.createWithNewSchema] Fetching created template data', {
-        template_id,
-      });
+      // Fetch created template and file for response
+      const [templateResult, fileResult] = await Promise.all([
+        supabase
+          .from('certificate_templates')
+          .select('id, title, category_id, subcategory_id, latest_version_id, created_at')
+          .eq('id', template_id)
+          .single(),
+        supabase
+          .from('files')
+          .select('id, bucket, path, mime_type, size_bytes')
+          .eq('id', file_id)
+          .single(),
+      ]);
 
-      const { data: templateData, error: templateFetchError } = await supabase
-        .from('certificate_templates')
-        .select('id, title, category_id, subcategory_id, latest_version_id, created_at')
-        .eq('id', template_id)
-        .single();
-
-      if (templateFetchError || !templateData) {
-        throw new Error(`Failed to fetch created template: ${templateFetchError?.message || 'No data returned'}`);
+      if (templateResult.error || !templateResult.data) {
+        throw new Error(`Failed to fetch created template: ${templateResult.error?.message || 'No data'}`);
+      }
+      if (fileResult.error || !fileResult.data) {
+        throw new Error(`Failed to fetch file data: ${fileResult.error?.message || 'No data'}`);
       }
 
-      console.log('[TemplateService.createWithNewSchema] Template data fetched from DB', {
-        template: templateData,
-      });
-
-      const { data: fileData, error: fileFetchError } = await supabase
-        .from('files')
-        .select('id, bucket, path, mime_type, size_bytes')
-        .eq('id', file_id)
-        .single();
-
-      if (fileFetchError || !fileData) {
-        throw new Error(`Failed to fetch file data: ${fileFetchError?.message || 'No data returned'}`);
-      }
-
-      console.log('[TemplateService.createWithNewSchema] File data fetched from DB', {
-        file: fileData,
-      });
-
-      // Type assertions for Supabase response
-      type TemplateRow = {
+      const templateData = templateResult.data as {
         id: string;
         title: string;
-        // status: removed - all templates are active and ready to use
         category_id: string;
         subcategory_id: string;
         latest_version_id: string | null;
         created_at: string;
       };
 
-      type FileRow = {
+      const fileData = fileResult.data as {
         id: string;
         bucket: string;
         path: string;
@@ -974,40 +930,30 @@ export class TemplateService {
         size_bytes: number;
       };
 
-      const typedTemplateData = templateData as TemplateRow;
-      const typedFileData = fileData as FileRow;
+      console.log('[TemplateService.createWithNewSchema] Template created', { template_id, version_id });
 
-      const result = {
+      return {
         template: {
-          id: typedTemplateData.id,
-          title: typedTemplateData.title,
-          // status: removed - all templates are active and ready to use
-          category_id: typedTemplateData.category_id,
-          subcategory_id: typedTemplateData.subcategory_id,
-          latest_version_id: typedTemplateData.latest_version_id,
-          created_at: typedTemplateData.created_at,
+          id: templateData.id,
+          title: templateData.title,
+          category_id: templateData.category_id,
+          subcategory_id: templateData.subcategory_id,
+          latest_version_id: templateData.latest_version_id,
+          created_at: templateData.created_at,
         },
         version: {
           id: version_id,
           version_number: 1,
           page_count: pageCount,
           source_file: {
-            id: typedFileData.id,
-            bucket: typedFileData.bucket,
-            path: typedFileData.path,
-            mime_type: typedFileData.mime_type,
-            size_bytes: typedFileData.size_bytes,
+            id: fileData.id,
+            bucket: fileData.bucket,
+            path: fileData.path,
+            mime_type: fileData.mime_type,
+            size_bytes: fileData.size_bytes,
           },
         },
       };
-
-      console.log('[TemplateService.createWithNewSchema] Returning result', {
-        template_id: result.template.id,
-        version_id: result.version.id,
-        source_file_id: result.version.source_file.id,
-      });
-
-      return result;
     } catch (error) {
       // Cleanup on failure
       if (fileId) {

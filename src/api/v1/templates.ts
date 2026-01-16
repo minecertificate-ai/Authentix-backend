@@ -245,52 +245,44 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       }
 
       try {
-        // Parse multipart form data using request.parts() to get both file and form fields
-        // Use Promise.race with timeout to prevent hanging
+        // Parse multipart data - IMPORTANT: Must consume each part before moving to next
+        // In @fastify/multipart, parts are streams that must be fully read in order
         const parts = request.parts();
-        let fileData: any = null;
+        let fileBuffer: Buffer | null = null;
+        let fileMetadata: { filename: string; mimetype: string; encoding: string; fieldname: string } | null = null;
         const formFields: Record<string, string> = {};
 
-        // Parse all parts with timeout protection
-        const parsePromise = (async () => {
-          for await (const part of parts) {
-            if (part.type === 'file') {
-              fileData = part;
-            } else {
-              // Form field - read the value
-              try {
-                const value = await part.value;
-                formFields[part.fieldname] = typeof value === 'string' ? value : String(value);
-              } catch (fieldError) {
-                request.log.warn({
-                  userId,
-                  organizationId,
-                  fieldname: part.fieldname,
-                  error: fieldError instanceof Error ? fieldError.message : 'Unknown error',
-                }, '[POST /templates] Failed to read form field');
+        // Iterate through all parts and consume each one immediately
+        for await (const part of parts) {
+          if (part.type === 'file') {
+            // CRITICAL: Must consume file buffer immediately before continuing to next part
+            // Streams must be fully read before moving on, otherwise they become invalid
+            fileBuffer = await part.toBuffer();
+            fileMetadata = {
+              filename: part.filename,
+              mimetype: part.mimetype,
+              encoding: part.encoding,
+              fieldname: part.fieldname,
+            };
+          } else {
+            // Form field - read the value
+            try {
+              const value = await part.value;
+              if (typeof value === 'string') {
+                formFields[part.fieldname] = value;
               }
+            } catch (fieldError) {
+              request.log.warn({
+                userId,
+                organizationId,
+                fieldname: part.fieldname,
+                error: fieldError instanceof Error ? fieldError.message : 'Unknown error',
+              }, '[POST /templates] Failed to read form field');
             }
           }
-        })();
-
-        // Add timeout protection (30 seconds)
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Multipart parsing timeout')), 30000);
-        });
-
-        try {
-          await Promise.race([parsePromise, timeoutPromise]);
-        } catch (parseError) {
-          request.log.error({
-            userId,
-            organizationId,
-            error: parseError instanceof Error ? parseError.message : 'Unknown error',
-          }, '[POST /templates] Error parsing multipart form data');
-          sendError(reply, 'VALIDATION_ERROR', 'Failed to parse form data', 400);
-          return;
         }
-        
-        if (!fileData) {
+
+        if (!fileBuffer || !fileMetadata) {
           request.log.warn({
             userId,
             organizationId,
@@ -304,10 +296,11 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           userId,
           organizationId,
           file_info: {
-            filename: fileData.filename,
-            mimetype: fileData.mimetype,
-            encoding: fileData.encoding,
-            fieldname: fileData.fieldname,
+            filename: fileMetadata.filename,
+            mimetype: fileMetadata.mimetype,
+            encoding: fileMetadata.encoding,
+            fieldname: fileMetadata.fieldname,
+            size_bytes: fileBuffer.length,
           },
           form_fields: formFields,
           form_fields_keys: Object.keys(formFields),
@@ -321,26 +314,20 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const categoryId = formFields.category_id?.trim() || '';
         const subcategoryId = formFields.subcategory_id?.trim() || '';
 
-        // Validate title (required, trimmed)
-        if (title.length === 0) {
+        // Validate required fields
+        if (!title) {
           sendError(reply, 'VALIDATION_ERROR', 'Title is required', 400);
           return;
         }
-
-        // Validate title length
         if (title.length > 255) {
           sendError(reply, 'VALIDATION_ERROR', 'Title must be 255 characters or less', 400);
           return;
         }
-
-        // Validate category_id
-        if (categoryId.length === 0) {
+        if (!categoryId) {
           sendError(reply, 'VALIDATION_ERROR', 'Category ID is required', 400);
           return;
         }
-
-        // Validate subcategory_id
-        if (subcategoryId.length === 0) {
+        if (!subcategoryId) {
           sendError(reply, 'VALIDATION_ERROR', 'Subcategory ID is required', 400);
           return;
         }
@@ -356,9 +343,6 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           return;
         }
 
-        // Read file buffer
-        const buffer = await fileData.toBuffer();
-
         request.log.info({
           userId,
           organizationId,
@@ -366,8 +350,8 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
             title,
             category_id: categoryId,
             subcategory_id: subcategoryId,
-            file_size_bytes: buffer.length,
-            mimetype: fileData.mimetype ?? 'application/octet-stream',
+            file_size_bytes: fileBuffer.length,
+            mimetype: fileMetadata.mimetype || 'application/octet-stream',
           },
         }, '[POST /templates] Parsed request data, calling service.createWithNewSchema()');
 
@@ -383,9 +367,9 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
             subcategory_id: subcategoryId,
           },
           {
-            buffer,
-            mimetype: fileData.mimetype ?? 'application/octet-stream',
-            originalname: fileData.filename ?? 'template',
+            buffer: fileBuffer,
+            mimetype: fileMetadata.mimetype || 'application/octet-stream',
+            originalname: fileMetadata.filename || 'template',
           }
         );
 
@@ -532,6 +516,34 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         } else {
           request.log.error(error, 'Failed to delete template');
           sendError(reply, 'INTERNAL_ERROR', 'Failed to delete template', 500);
+        }
+      }
+    }
+  );
+
+  /**
+   * GET /api/v1/templates/:id/preview-url
+   * Get signed preview URL (alias for /preview)
+   * Note: This route must be defined before /preview to ensure correct matching
+   */
+  app.get(
+    '/templates/:id/preview-url',
+    async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+      try {
+        const { id } = request.params;
+
+        const repository = new TemplateRepository(getSupabaseClient());
+        const service = new TemplateService(repository);
+
+        const previewUrl = await service.getPreviewUrl(id, request.context!.organizationId);
+
+        sendSuccess(reply, { preview_url: previewUrl });
+      } catch (error) {
+        if (error instanceof NotFoundError) {
+          sendError(reply, 'NOT_FOUND', error.message, 404);
+        } else {
+          request.log.error(error, 'Failed to get preview URL');
+          sendError(reply, 'INTERNAL_ERROR', 'Failed to get preview URL', 500);
         }
       }
     }

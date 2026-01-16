@@ -353,23 +353,31 @@ export class TemplateRepository {
 
   /**
    * Get certificate categories for organization
+   * Returns categories with their subcategories
    */
-  async getCategories(organizationId: string, industry: string | null): Promise<Array<{
+  async getCategories(organizationId: string, industryId: string | null): Promise<Array<{
     certificate_category: string;
     certificate_subcategory: string;
   }>> {
+    // Query categories with subcategories (filter out deleted subcategories)
     let query = this.supabase
       .from('certificate_categories')
-      .select('certificate_category, certificate_subcategory')
-      .is('deleted_at', null);
+      .select(`
+        name,
+        key,
+        subcategories:certificate_subcategories!certificate_subcategories_category_id_fkey (
+          name,
+          key
+        )
+      `)
+      .or(`organization_id.is.null,organization_id.eq.${organizationId}`);
+    
+    // Note: PostgREST will automatically filter subcategories by deleted_at via RLS
 
-    // Filter by industry if provided
-    if (industry) {
-      query = query.eq('industry', industry);
+    // Filter by industry_id if provided
+    if (industryId) {
+      query = query.eq('industry_id', industryId);
     }
-
-    // Get organization-specific and system-wide categories
-    query = query.or(`organization_id.is.null,organization_id.eq.${organizationId}`);
 
     const { data, error } = await query;
 
@@ -377,14 +385,34 @@ export class TemplateRepository {
       throw new Error(`Failed to fetch categories: ${error.message}`);
     }
 
-    return (data ?? []) as Array<{
-      certificate_category: string;
-      certificate_subcategory: string;
-    }>;
+    // Flatten categories and subcategories into pairs
+    const result: Array<{ certificate_category: string; certificate_subcategory: string }> = [];
+    
+    (data ?? []).forEach((category: any) => {
+      const categoryName = category.name || category.key;
+      const subcategories = (category.subcategories || []).filter((subcat: any) => !subcat.deleted_at);
+      
+      if (subcategories.length > 0) {
+        subcategories.forEach((subcat: any) => {
+          result.push({
+            certificate_category: categoryName,
+            certificate_subcategory: subcat.name || subcat.key,
+          });
+        });
+      } else {
+        // Include category even if no subcategories
+        result.push({
+          certificate_category: categoryName,
+          certificate_subcategory: categoryName,
+        });
+      }
+    });
+
+    return result;
   }
 
   /**
-   * Get organization industry
+   * Get organization industry_id
    */
   async getOrganizationIndustry(organizationId: string): Promise<string | null> {
     const { data, error } = await this.supabase
@@ -447,6 +475,24 @@ export class TemplateRepository {
       });
     }
 
+    // Derive file_type from source_file mime_type
+    let fileType: TemplateFileType = 'pdf';
+    if (sourceFile?.mime_type) {
+      const mimeType = sourceFile.mime_type.toLowerCase();
+      if (mimeType === 'image/png') {
+        fileType = 'png';
+      } else if (mimeType === 'image/jpeg') {
+        fileType = 'jpg';
+      } else if (mimeType === 'image/webp') {
+        fileType = 'webp';
+      } else if (mimeType.includes('word') || mimeType.includes('document')) {
+        fileType = 'docx';
+      } else if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) {
+        fileType = 'pptx';
+      }
+      // Default remains 'pdf' for application/pdf
+    }
+
     return {
       id: row.id as string,
       organization_id: row.organization_id as string,
@@ -454,7 +500,7 @@ export class TemplateRepository {
       name: row.title as string,
       // New schema doesn't have these fields, set to null
       description: null,
-      file_type: 'pdf' as TemplateFileType, // Default, not in new schema
+      file_type: fileType,
       storage_path: '', // Not in new schema, fields are in versions
       preview_url: null, // Will be generated from preview_file if exists
       // status: removed - all templates are active and ready to use

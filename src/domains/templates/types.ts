@@ -30,7 +30,7 @@ export type CertificateField = z.infer<typeof certificateFieldSchema>;
 /**
  * Template file type
  */
-export const templateFileTypeSchema = z.enum(['pdf', 'png', 'jpg', 'jpeg']);
+export const templateFileTypeSchema = z.enum(['pdf', 'png', 'jpg', 'jpeg', 'webp', 'docx', 'pptx']);
 
 export type TemplateFileType = z.infer<typeof templateFileTypeSchema>;
 

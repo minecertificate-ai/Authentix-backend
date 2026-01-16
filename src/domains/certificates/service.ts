@@ -31,7 +31,7 @@ export class CertificateService {
    * For batches > 50: Returns job ID for async processing
    */
   async generateCertificates(
-    companyId: string,
+    organizationId: string,
     _userId: string,
     dto: GenerateCertificatesDTO,
     appUrl: string
@@ -48,19 +48,78 @@ export class CertificateService {
       };
     }
 
-    // Get template
-    const template = await this.templateRepository.findById(
-      dto.template_id,
-      companyId
-    );
+    // Get template with version and files (new schema)
+    const supabase = getSupabaseClient();
+    const { data: templateData, error: templateError } = await supabase
+      .from('certificate_templates')
+      .select(`
+        id,
+        title,
+        latest_version_id,
+        latest_version:certificate_template_versions!fk_templates_latest_version (
+          id,
+          source_file_id,
+          source_file:source_file_id (
+            id,
+            bucket,
+            path,
+            mime_type
+          )
+        )
+      `)
+      .eq('id', dto.template_id)
+      .eq('organization_id', organizationId)
+      .is('deleted_at', null)
+      .single();
 
-    if (!template) {
+    if (templateError || !templateData) {
       throw new NotFoundError('Template not found');
     }
 
-    if (template.status !== 'active') {
-      throw new ValidationError('Template is not active');
+    const version = (templateData as any).latest_version;
+    if (!version || !version.source_file) {
+      throw new ValidationError('Template version or source file not found');
     }
+
+    // Get template fields
+    const { data: fieldsData, error: fieldsError } = await supabase
+      .from('certificate_template_fields')
+      .select('id, field_key, label, type, page_number, x, y, width, height, style, required')
+      .eq('template_version_id', version.id)
+      .order('created_at', { ascending: true });
+
+    if (fieldsError) {
+      throw new Error(`Failed to fetch template fields: ${fieldsError.message}`);
+    }
+
+    const fields = (fieldsData ?? []).map((f: any) => ({
+      id: f.id,
+      field_key: f.field_key,
+      label: f.label,
+      type: f.type,
+      page_number: f.page_number,
+      x: f.x,
+      y: f.y,
+      width: f.width,
+      height: f.height,
+      style: f.style,
+      required: f.required,
+    }));
+
+    // Get signed URL for source file
+    const sourceFile = version.source_file;
+    const { data: urlData, error: urlError } = await supabase.storage
+      .from(sourceFile.bucket)
+      .createSignedUrl(sourceFile.path, 3600);
+
+    if (urlError || !urlData) {
+      throw new Error(`Failed to get template file URL: ${urlError?.message || 'Unknown error'}`);
+    }
+
+    const templateUrl = urlData.signedUrl;
+    const templateMimeType = sourceFile.mime_type;
+    const templateType = templateMimeType === 'application/pdf' ? 'pdf' : 
+                        templateMimeType?.startsWith('image/') ? 'image' : 'pdf';
 
     // Generate certificates synchronously
     const zip = new JSZip();
@@ -75,11 +134,11 @@ export class CertificateService {
 
         // Generate PDF
         const pdfBytes = await generateCertificatePDF({
-          templateUrl: template.preview_url ?? '',
-          templateType: template.file_type,
-          templateWidth: template.width ?? undefined,
-          templateHeight: template.height ?? undefined,
-          fields: template.fields,
+          templateUrl,
+          templateType,
+          templateWidth: undefined,
+          templateHeight: undefined,
+          fields,
           fieldMappings: dto.field_mappings,
           rowData,
           includeQR: dto.options?.includeQR ?? true,
@@ -90,7 +149,7 @@ export class CertificateService {
         // Get recipient name for filename
         const nameMapping = dto.field_mappings.find(
           (m) =>
-            template.fields.find((f) => f.id === m.fieldId)?.type === 'name'
+            fields.find((f) => f.id === m.fieldId)?.type === 'name'
         );
         const recipientName = nameMapping
           ? String(rowData[nameMapping.columnName] ?? 'certificate')
@@ -114,12 +173,11 @@ export class CertificateService {
     const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
 
     // Upload to Supabase Storage
-    const supabase = getSupabaseClient();
     const zipFileName = `${Date.now()}-certificates.zip`;
-    const storagePath = `bulk-downloads/${companyId}/${zipFileName}`;
+    const storagePath = `certificates/${organizationId}/${zipFileName}`;
 
     const { error: uploadError } = await supabase.storage
-      .from('minecertificate')
+      .from('authentix')
       .upload(storagePath, zipBuffer, {
         contentType: 'application/zip',
         upsert: false,
@@ -130,13 +188,13 @@ export class CertificateService {
     }
 
     // Get signed URL (expires in 1 hour)
-    const { data: urlData } = await supabase.storage
-      .from('minecertificate')
+    const { data: signedUrlData } = await supabase.storage
+      .from('authentix')
       .createSignedUrl(storagePath, 3600);
 
     return {
       status: 'completed',
-      download_url: urlData?.signedUrl ?? '',
+      download_url: signedUrlData?.signedUrl ?? '',
       total_certificates: certificates.length,
       certificates,
     };

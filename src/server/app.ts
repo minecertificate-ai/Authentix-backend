@@ -37,6 +37,10 @@ export async function buildApp() {
     genReqId: () => randomUUID(),
     // Trust proxy headers (for accurate IP addresses behind reverse proxy)
     trustProxy: true,
+    // Increase request timeout for large file uploads (PDFs can be large)
+    connectionTimeout: 120000, // 2 minutes
+    requestTimeout: 120000, // 2 minutes
+    bodyLimit: 50 * 1024 * 1024, // 50MB (matches multipart fileSize limit)
   });
 
   // ========================================

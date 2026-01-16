@@ -95,6 +95,41 @@ export async function validateFileUpload(
     };
   }
 
+  // Handle PDF files (check for PDF magic bytes: %PDF-)
+  // PDFs start with %PDF- (0x25 0x50 0x44 0x46 0x2D)
+  // Some PDFs may have whitespace or other content before the header, so check first 1024 bytes
+  if (clientMimetype === 'application/pdf') {
+    // Check first 1024 bytes for PDF header pattern
+    const checkBytes = Math.min(1024, buffer.length);
+    let foundPdfHeader = false;
+    
+    // Look for %PDF- pattern in first 1024 bytes
+    for (let i = 0; i <= checkBytes - 5; i++) {
+      if (buffer[i] === 0x25 && // %
+          buffer[i + 1] === 0x50 && // P
+          buffer[i + 2] === 0x44 && // D
+          buffer[i + 3] === 0x46 && // F
+          buffer[i + 4] === 0x2D) { // -
+        foundPdfHeader = true;
+        break;
+      }
+    }
+    
+    if (!foundPdfHeader) {
+      throw new ValidationError(
+        'File content does not match declared PDF type. PDF files must contain %PDF- header.',
+        { clientMimetype, detectedType: fileTypeResult?.mime ?? 'unknown' }
+      );
+    }
+
+    return {
+      isValid: true,
+      detectedType: 'application/pdf',
+      expectedType: clientMimetype,
+      extension: 'pdf',
+    };
+  }
+
   // Handle Office Open XML formats (XLSX, DOCX, PPTX - all ZIP archives)
   const officeXmlTypes = [
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // XLSX
