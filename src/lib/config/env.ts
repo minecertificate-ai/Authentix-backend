@@ -21,7 +21,7 @@ const envSchema = z.object({
   APP_URL: z.string().url().optional(),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
-  PORT: z.string().transform(Number).pipe(z.number().int().positive()).default('3000'),
+  PORT: z.string().transform(Number).pipe(z.number().int().positive()).default('3001'),
   HOST: z.string().default('0.0.0.0'),
 
   // Optional - Razorpay (Test)

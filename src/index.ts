@@ -21,7 +21,7 @@ const appPromise = buildApp();
 const start = async () => {
   try {
     const app = await appPromise;
-    const port = Number(process.env.PORT) || 3000;
+    const port = Number(process.env.PORT) || 3001;
     const host = process.env.HOST || '0.0.0.0';
 
     await app.listen({ port, host });

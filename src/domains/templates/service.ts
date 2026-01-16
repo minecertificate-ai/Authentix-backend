@@ -19,11 +19,31 @@ export class TemplateService {
    * Get template by ID
    */
   async getById(id: string, organizationId: string): Promise<TemplateEntity> {
+    console.log('[TemplateService.getById] Calling repository.findById()', {
+      template_id: id,
+      organizationId,
+    });
+
     const template = await this.repository.findById(id, organizationId);
 
     if (!template) {
+      console.log('[TemplateService.getById] Template not found', {
+        template_id: id,
+        organizationId,
+      });
       throw new NotFoundError('Template not found');
     }
+
+    console.log('[TemplateService.getById] Template found', {
+      template_id: id,
+      organizationId,
+      template: {
+        id: template.id,
+        name: template.name,
+        status: template.status,
+        has_storage_path: !!template.storage_path,
+      },
+    });
 
     return template;
   }
@@ -46,6 +66,17 @@ export class TemplateService {
     const page = options.page ?? 1;
     const offset = (page - 1) * limit;
 
+    console.log('[TemplateService.list] Calling repository.findAll()', {
+      organizationId,
+      options: {
+        status: options.status,
+        limit,
+        offset,
+        sortBy: options.sortBy,
+        sortOrder: options.sortOrder,
+      },
+    });
+
     const { data, count } = await this.repository.findAll(organizationId, {
       status: options.status,
       limit,
@@ -54,18 +85,155 @@ export class TemplateService {
       sortOrder: options.sortOrder,
     });
 
+    console.log('[TemplateService.list] Repository returned data', {
+      organizationId,
+      templates_count: data.length,
+      total_count: count,
+      template_ids: data.map(t => t.id),
+    });
+
+    // Generate preview URLs for templates that have preview files
+    // Previews are generated at upload time, so we just fetch the stored preview URLs
+    // Use Promise.allSettled to ensure one template error doesn't break the entire list
+    const templatePromises = data.map(async (template) => {
+      try {
+        const templateWithPreview = template as any;
+        
+        // Log preview file status
+        console.log('[TemplateService.list] Checking preview for template', {
+          template_id: template.id,
+          has_preview_file: !!templateWithPreview.preview_file,
+          preview_file_id: templateWithPreview.preview_file?.id || null,
+          latest_version_id: templateWithPreview.latest_version_id,
+        });
+
+        // If preview file exists (generated at upload time), use it
+        if (templateWithPreview.preview_file?.path && templateWithPreview.preview_file?.bucket) {
+          try {
+            const previewUrl = await this.getPreviewUrlForPath(
+              templateWithPreview.preview_file.bucket,
+              templateWithPreview.preview_file.path
+            );
+            console.log('[TemplateService.list] Generated preview URL from stored preview file', {
+              template_id: template.id,
+              preview_file_id: templateWithPreview.preview_file.id,
+              preview_url: previewUrl.substring(0, 50) + '...',
+            });
+            return {
+              ...template,
+              preview_url: previewUrl,
+            };
+          } catch (error) {
+            console.warn('[TemplateService.list] Failed to generate preview URL from stored preview file', {
+              template_id: template.id,
+              preview_file_id: templateWithPreview.preview_file?.id,
+              error: error instanceof Error ? error.message : 'Unknown error',
+            });
+            // Continue - template will be returned without preview_url
+          }
+        } 
+        
+        // Fallback: Use source file as preview if it's an image (for templates uploaded before preview generation was implemented)
+        // This is a temporary fallback - new templates should always have previews generated at upload time
+        if (!templateWithPreview.preview_file && templateWithPreview.source_file?.path && templateWithPreview.source_file?.bucket) {
+          try {
+            const sourceFile = templateWithPreview.source_file;
+            const imageMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+            
+            // Use source file as preview if it's an image (legacy templates only)
+            if (sourceFile.mime_type && imageMimeTypes.includes(sourceFile.mime_type)) {
+              console.log('[TemplateService.list] Using source file as preview (legacy fallback)', {
+                template_id: template.id,
+                source_file_mime_type: sourceFile.mime_type,
+                note: 'This template was uploaded before preview generation was implemented',
+              });
+
+              const previewUrl = await this.getPreviewUrlForPath(
+                sourceFile.bucket,
+                sourceFile.path
+              );
+              
+              console.log('[TemplateService.list] Generated preview URL from source file (fallback)', {
+                template_id: template.id,
+                preview_url: previewUrl.substring(0, 50) + '...',
+              });
+
+              return {
+                ...template,
+                preview_url: previewUrl,
+              };
+            }
+          } catch (error) {
+            console.warn('[TemplateService.list] Failed to generate preview URL from source file', {
+              template_id: template.id,
+              error: error instanceof Error ? error.message : 'Unknown error',
+            });
+            // Continue - template will be returned without preview_url
+          }
+        }
+        
+        console.log('[TemplateService.list] No preview available for template', {
+          template_id: template.id,
+          latest_version_id: templateWithPreview.latest_version_id,
+          has_preview_file: !!templateWithPreview.preview_file,
+          has_source_file: !!templateWithPreview.source_file,
+        });
+        return template;
+      } catch (error) {
+        // Catch any unexpected errors and return template without preview
+        console.error('[TemplateService.list] Unexpected error processing template', {
+          template_id: template.id,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          error_stack: error instanceof Error ? error.stack : undefined,
+        });
+        return template; // Return template without preview_url
+      }
+    });
+
+    // Use Promise.allSettled to handle errors gracefully
+    const results = await Promise.allSettled(templatePromises);
+    const templatesWithPreviewUrls = results.map((result, index) => {
+      if (result.status === 'fulfilled') {
+        return result.value;
+      } else {
+        // If a template failed, log error and return template without preview_url
+        const template = data[index];
+        console.error('[TemplateService.list] Failed to process template preview', {
+          template_id: template.id,
+          error: result.reason instanceof Error ? result.reason.message : 'Unknown error',
+          error_stack: result.reason instanceof Error ? result.reason.stack : undefined,
+        });
+        return template; // Return template without preview_url
+      }
+    });
+
     // If includePreviewUrl is requested, batch generate signed URLs for legacy templates
     // For new schema templates, previews are already included from the join
-    if (options.includePreviewUrl && data.length > 0) {
-      const templatesWithUrls = await this.batchGeneratePreviewUrls(data);
+    if (options.includePreviewUrl && templatesWithPreviewUrls.length > 0) {
+      console.log('[TemplateService.list] Generating preview URLs', {
+        organizationId,
+        templates_count: templatesWithPreviewUrls.length,
+      });
+      const templatesWithUrls = await this.batchGeneratePreviewUrls(templatesWithPreviewUrls);
+      console.log('[TemplateService.list] Preview URLs generated', {
+        organizationId,
+        templates_with_urls: templatesWithUrls.filter(t => t.preview_url).length,
+      });
       return {
         templates: templatesWithUrls,
         total: count,
       };
     }
 
+    console.log('[TemplateService.list] Returning templates with preview URLs', {
+      organizationId,
+      templates_count: templatesWithPreviewUrls.length,
+      total: count,
+      templates_with_preview: templatesWithPreviewUrls.filter(t => t.preview_url).length,
+    });
+
     return {
-      templates: data,
+      templates: templatesWithPreviewUrls,
       total: count,
     };
   }
@@ -215,12 +383,83 @@ export class TemplateService {
 
   /**
    * Delete template
+   * Also deletes associated files from storage
    */
   async delete(id: string, organizationId: string): Promise<void> {
     // Verify template exists
     await this.getById(id, organizationId);
 
+    // Get all file paths before deleting
+    let filePaths: Array<{ bucket: string; path: string }> = [];
+    try {
+      filePaths = await this.repository.getTemplateFilePaths(id, organizationId);
+      console.log('[TemplateService.delete] Found files to delete', {
+        template_id: id,
+        file_count: filePaths.length,
+        files: filePaths.map(f => `${f.bucket}/${f.path}`),
+      });
+    } catch (error) {
+      console.warn('[TemplateService.delete] Failed to get file paths (non-fatal)', {
+        template_id: id,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      // Continue with delete even if we can't get file paths
+    }
+
+    // Delete files from storage
+    if (filePaths.length > 0) {
+      const supabase = getSupabaseClient();
+      
+      // Group files by bucket for batch deletion
+      const filesByBucket = new Map<string, string[]>();
+      filePaths.forEach(({ bucket, path }) => {
+        if (!filesByBucket.has(bucket)) {
+          filesByBucket.set(bucket, []);
+        }
+        filesByBucket.get(bucket)!.push(path);
+      });
+
+      // Delete files from each bucket
+      for (const [bucket, paths] of filesByBucket.entries()) {
+        try {
+          const { error: deleteError } = await supabase.storage
+            .from(bucket)
+            .remove(paths);
+
+          if (deleteError) {
+            console.error('[TemplateService.delete] Failed to delete files from storage', {
+              template_id: id,
+              bucket,
+              paths,
+              error: deleteError.message,
+            });
+            // Continue with delete even if storage cleanup fails
+          } else {
+            console.log('[TemplateService.delete] Deleted files from storage', {
+              template_id: id,
+              bucket,
+              file_count: paths.length,
+            });
+          }
+        } catch (error) {
+          console.error('[TemplateService.delete] Error deleting files from storage', {
+            template_id: id,
+            bucket,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          });
+          // Continue with delete even if storage cleanup fails
+        }
+      }
+    }
+
+    // Soft delete template (marks as deleted in database)
     await this.repository.delete(id, organizationId);
+    
+    console.log('[TemplateService.delete] Template deleted successfully', {
+      template_id: id,
+      organization_id: organizationId,
+      files_deleted: filePaths.length,
+    });
   }
 
   /**
@@ -259,6 +498,41 @@ export class TemplateService {
 
     return data.signedUrl;
   }
+
+  /**
+   * Generate signed URL for a preview file path (new schema)
+   */
+  private async getPreviewUrlForPath(bucket: string, path: string): Promise<string> {
+    if (!bucket || !path) {
+      throw new Error(`Invalid preview file data: bucket=${bucket}, path=${path}`);
+    }
+
+    // Check cache first
+    const cached = getCachedSignedUrl(path);
+    if (cached) {
+      return cached;
+    }
+
+    // Generate signed URL (expires in 1 hour)
+    const supabase = getSupabaseClient();
+    const { data, error } = await supabase.storage
+      .from(bucket)
+      .createSignedUrl(path, 3600);
+
+    if (error || !data) {
+      throw new Error(`Failed to generate signed URL for preview: ${error?.message || 'Unknown error'}`);
+    }
+
+    if (!data.signedUrl) {
+      throw new Error('Signed URL generation returned empty result');
+    }
+
+    // Cache the signed URL (expires in 3600 seconds)
+    setCachedSignedUrl(path, data.signedUrl, 3600);
+
+    return data.signedUrl;
+  }
+
 
   /**
    * Get certificate categories for organization
@@ -355,6 +629,21 @@ export class TemplateService {
       };
     };
   }> {
+    console.log('[TemplateService.createWithNewSchema] Starting template creation', {
+      organizationId,
+      userId,
+      dto: {
+        title: dto.title,
+        category_id: dto.category_id,
+        subcategory_id: dto.subcategory_id,
+      },
+      file: {
+        mimetype: file.mimetype,
+        originalname: file.originalname,
+        size_bytes: file.buffer.length,
+      },
+    });
+
     const { CatalogRepository } = await import('../catalog/repository.js');
     const { computeSHA256 } = await import('../../lib/uploads/checksum.js');
     const { getPDFPageCount } = await import('../../lib/uploads/pdf-utils.js');
@@ -364,6 +653,7 @@ export class TemplateService {
     const catalogRepo = new CatalogRepository(supabase);
 
     // Validate file
+    console.log('[TemplateService.createWithNewSchema] Validating file upload');
     const allowedMimeTypes = [
       'application/pdf',
       'image/png',
@@ -381,7 +671,16 @@ export class TemplateService {
 
     const validatedMimetype = validationResult.detectedType;
 
+    console.log('[TemplateService.createWithNewSchema] File validated', {
+      original_mimetype: file.mimetype,
+      validated_mimetype: validatedMimetype,
+    });
+
     // Validate category and subcategory
+    console.log('[TemplateService.createWithNewSchema] Validating category and subcategory', {
+      category_id: dto.category_id,
+      subcategory_id: dto.subcategory_id,
+    });
     const isValidCategory = await catalogRepo.validateCategoryForOrganization(
       organizationId,
       dto.category_id
@@ -427,6 +726,14 @@ export class TemplateService {
     // Step 1: Create template record first (to get template_id for storage path)
     let template_id: string;
     try {
+      console.log('[TemplateService.createWithNewSchema] Creating template record in DB', {
+        organizationId,
+        userId,
+        title: trimmedTitle,
+        category_id: dto.category_id,
+        subcategory_id: dto.subcategory_id,
+      });
+
       const result = await this.repository.createWithNewSchema(
         organizationId,
         userId,
@@ -437,6 +744,10 @@ export class TemplateService {
         }
       );
       template_id = result.template_id;
+
+      console.log('[TemplateService.createWithNewSchema] Template record created', {
+        template_id,
+      });
     } catch (error: any) {
       // Handle constraint violations
       if (error?.code === '23514' || error?.message?.includes('files_path_chk')) {
@@ -481,6 +792,13 @@ export class TemplateService {
       // Step 5: Create file registry entry (with path validation)
       let file_id: string;
       try {
+        console.log('[TemplateService.createWithNewSchema] Creating file registry entry', {
+          organizationId,
+          storage_path: storagePath,
+          file_size_bytes: file.buffer.length,
+          checksum: checksum.substring(0, 16) + '...',
+        });
+
         const result = await this.repository.createFileEntry(
           organizationId,
           userId,
@@ -496,6 +814,10 @@ export class TemplateService {
         );
         file_id = result.file_id;
         fileId = file_id;
+
+        console.log('[TemplateService.createWithNewSchema] File registry entry created', {
+          file_id,
+        });
       } catch (error: any) {
         // Handle constraint violations with detailed error
         if (error?.code === '23514' || error?.message?.includes('files_path_chk')) {
@@ -508,6 +830,12 @@ export class TemplateService {
       // Step 6: Create template version
       let version_id: string;
       try {
+        console.log('[TemplateService.createWithNewSchema] Creating template version', {
+          template_id,
+          file_id,
+          page_count: pageCount,
+        });
+
         const result = await this.repository.createTemplateVersion(
           template_id,
           {
@@ -519,6 +847,10 @@ export class TemplateService {
           }
         );
         version_id = result.version_id;
+
+        console.log('[TemplateService.createWithNewSchema] Template version created', {
+          version_id,
+        });
       } catch (error: any) {
         // If version creation fails, cleanup file entry
         if (fileId) {
@@ -530,7 +862,49 @@ export class TemplateService {
       // Step 7: Update template latest_version_id
       await this.repository.updateLatestVersion(template_id, version_id);
 
-      // Step 8: Create audit log
+      // Step 8: Auto-generate preview for images (synchronous for images, async for PDFs)
+      // This ensures preview URLs are available immediately when listing templates
+      try {
+        const imageMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        
+        if (imageMimeTypes.includes(validatedMimetype)) {
+          console.log('[TemplateService.createWithNewSchema] Auto-generating preview for image template', {
+            template_id,
+            version_id,
+            mime_type: validatedMimetype,
+          });
+
+          // For images, generate preview immediately (it's just copying/resizing the file)
+          // This stores the preview_file_id in the version record for fast retrieval during list
+          const previewResult = await this.generatePreview(template_id, version_id, organizationId, userId);
+          
+          console.log('[TemplateService.createWithNewSchema] Preview generated and stored successfully', {
+            template_id,
+            version_id,
+            preview_file_id: previewResult.preview_file_id,
+            preview_path: previewResult.preview_path,
+          });
+        } else {
+          console.log('[TemplateService.createWithNewSchema] Skipping auto-preview generation for non-image file', {
+            template_id,
+            version_id,
+            mime_type: validatedMimetype,
+            note: 'Preview can be generated later via POST /templates/:templateId/versions/:versionId/preview',
+          });
+        }
+      } catch (previewError) {
+        // Preview generation failures are non-fatal - template creation should still succeed
+        // But log the error so it can be debugged
+        console.error('[TemplateService.createWithNewSchema] Failed to auto-generate preview (non-fatal)', {
+          template_id,
+          version_id,
+          error: previewError instanceof Error ? previewError.message : 'Unknown error',
+          error_stack: previewError instanceof Error ? previewError.stack : undefined,
+        });
+        // Template will be created without preview - user can generate it manually later
+      }
+
+      // Step 9: Create audit log
       try {
         await supabase.from('app_audit_logs').insert({
           organization_id: organizationId,
@@ -551,6 +925,10 @@ export class TemplateService {
       }
 
       // Fetch created template for response
+      console.log('[TemplateService.createWithNewSchema] Fetching created template data', {
+        template_id,
+      });
+
       const { data: templateData, error: templateFetchError } = await supabase
         .from('certificate_templates')
         .select('id, title, status, category_id, subcategory_id, latest_version_id, created_at')
@@ -561,6 +939,10 @@ export class TemplateService {
         throw new Error(`Failed to fetch created template: ${templateFetchError?.message || 'No data returned'}`);
       }
 
+      console.log('[TemplateService.createWithNewSchema] Template data fetched from DB', {
+        template: templateData,
+      });
+
       const { data: fileData, error: fileFetchError } = await supabase
         .from('files')
         .select('id, bucket, path, mime_type, size_bytes')
@@ -570,6 +952,10 @@ export class TemplateService {
       if (fileFetchError || !fileData) {
         throw new Error(`Failed to fetch file data: ${fileFetchError?.message || 'No data returned'}`);
       }
+
+      console.log('[TemplateService.createWithNewSchema] File data fetched from DB', {
+        file: fileData,
+      });
 
       // Type assertions for Supabase response
       type TemplateRow = {
@@ -593,7 +979,7 @@ export class TemplateService {
       const typedTemplateData = templateData as TemplateRow;
       const typedFileData = fileData as FileRow;
 
-      return {
+      const result = {
         template: {
           id: typedTemplateData.id,
           title: typedTemplateData.title,
@@ -616,6 +1002,14 @@ export class TemplateService {
           },
         },
       };
+
+      console.log('[TemplateService.createWithNewSchema] Returning result', {
+        template_id: result.template.id,
+        version_id: result.version.id,
+        source_file_id: result.version.source_file.id,
+      });
+
+      return result;
     } catch (error) {
       // Cleanup on failure
       if (fileId) {
@@ -643,15 +1037,51 @@ export class TemplateService {
     templateId: string,
     organizationId: string
   ): Promise<TemplateEditorData> {
+    console.log('[TemplateService.getTemplateForEditor] Calling repository.getTemplateForEditor()', {
+      template_id: templateId,
+      organizationId,
+    });
+
     const data = await this.repository.getTemplateForEditor(templateId, organizationId);
 
     if (!data) {
+      console.log('[TemplateService.getTemplateForEditor] Template not found', {
+        template_id: templateId,
+        organizationId,
+      });
       throw new NotFoundError('Template not found or does not belong to organization');
     }
 
     if (!data.version || !data.source_file) {
+      console.log('[TemplateService.getTemplateForEditor] Missing version or source_file', {
+        template_id: templateId,
+        organizationId,
+        has_version: !!data.version,
+        has_source_file: !!data.source_file,
+      });
       throw new NotFoundError('Template version or source file not found');
     }
+
+    console.log('[TemplateService.getTemplateForEditor] Template data retrieved', {
+      template_id: templateId,
+      organizationId,
+      template: {
+        id: data.template.id,
+        title: data.template.title,
+        status: data.template.status,
+      },
+      version: {
+        id: data.version.id,
+        version_number: data.version.version_number,
+        page_count: data.version.page_count,
+      },
+      source_file: {
+        id: data.source_file.id,
+        bucket: data.source_file.bucket,
+        path: data.source_file.path,
+      },
+      fields_count: data.fields.length,
+    });
 
     return {
       template: data.template,
@@ -811,7 +1241,7 @@ export class TemplateService {
     templateId: string,
     versionId: string,
     organizationId: string,
-    userId: string
+    userId?: string
   ): Promise<{
     status: 'generated' | 'already_exists';
     preview_file_id: string | null;
@@ -869,23 +1299,25 @@ export class TemplateService {
       versionId,
     });
 
-    // Create audit log
-    try {
-      await supabase.from('app_audit_logs').insert({
-        organization_id: organizationId,
-        actor_user_id: userId,
-        action: 'template.preview_generated',
-        entity_type: 'certificate_template_version',
-        entity_id: versionId,
-        metadata: {
-          template_id: templateId,
-          preview_file_id: result.preview_file_id,
-          path: result.preview_path,
-        },
-      } as any);
-    } catch (auditError) {
-      // Audit log failures are non-fatal
-      console.warn('[TemplateService.generatePreview] Failed to create audit log:', auditError);
+    // Create audit log (only if userId is provided)
+    if (userId) {
+      try {
+        await supabase.from('app_audit_logs').insert({
+          organization_id: organizationId,
+          actor_user_id: userId,
+          action: 'template.preview_generated',
+          entity_type: 'certificate_template_version',
+          entity_id: versionId,
+          metadata: {
+            template_id: templateId,
+            preview_file_id: result.preview_file_id,
+            path: result.preview_path,
+          },
+        } as any);
+      } catch (auditError) {
+        // Audit log failures are non-fatal
+        console.warn('[TemplateService.generatePreview] Failed to create audit log:', auditError);
+      }
     }
 
     return {

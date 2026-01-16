@@ -37,11 +37,28 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
   app.get(
     '/templates',
     async (request: FastifyRequest, reply: FastifyReply) => {
+      const organizationId = request.context!.organizationId;
+      const userId = request.context!.userId;
+      
       try {
         const { page, limit, sort_by, sort_order } = parsePagination(request.query);
         const query = request.query as { status?: string; include?: string };
         const status = query.status;
         const include = query.include;
+
+        // Log incoming request data
+        request.log.info({
+          userId,
+          organizationId,
+          query_params: {
+            page,
+            limit,
+            sort_by,
+            sort_order,
+            status,
+            include,
+          },
+        }, '[GET /templates] Request received from frontend');
 
         // Check if preview_url should be included (batch optimization)
         const includePreviewUrl = include?.split(',').includes('preview_url') ?? false;
@@ -49,7 +66,20 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        const { templates, total } = await service.list(request.context!.organizationId, {
+        request.log.info({
+          userId,
+          organizationId,
+          service_options: {
+            status,
+            page,
+            limit,
+            sortBy: sort_by,
+            sortOrder: sort_order,
+            includePreviewUrl,
+          },
+        }, '[GET /templates] Calling service.list()');
+
+        const { templates, total } = await service.list(organizationId, {
           status,
           page,
           limit,
@@ -58,15 +88,67 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           includePreviewUrl,
         });
 
-        sendPaginated(reply, {
-          items: templates,
+        // Transform templates to include new schema fields
+        const transformedTemplates = templates.map(t => {
+          const template = t as any;
+          return {
+            ...template,
+            // Ensure title is present (from new schema) or fallback to name (legacy)
+            title: template.title || template.name,
+            // Include category/subcategory IDs from new schema
+            category_id: template.category_id,
+            subcategory_id: template.subcategory_id,
+            // Include category/subcategory names
+            category_name: template.certificate_category,
+            subcategory_name: template.certificate_subcategory,
+          };
+        });
+
+        // Log data fetched from DB
+        request.log.info({
+          userId,
+          organizationId,
+          db_results: {
+            templates_count: templates.length,
+            total_count: total,
+            template_ids: templates.map(t => t.id),
+            first_template: transformedTemplates[0] ? {
+              id: transformedTemplates[0].id,
+              title: transformedTemplates[0].title,
+              category_id: transformedTemplates[0].category_id,
+              subcategory_id: transformedTemplates[0].subcategory_id,
+            } : null,
+          },
+        }, '[GET /templates] Data fetched from database');
+
+        const responseData = {
+          items: transformedTemplates,
           pagination: {
             page: page ?? 1,
             limit: limit ?? 20,
             total,
             total_pages: Math.ceil(total / (limit ?? 20)),
           },
-        });
+        };
+
+        // Log response data being sent to frontend
+        request.log.info({
+          userId,
+          organizationId,
+          response: {
+            items_count: responseData.items.length,
+            pagination: responseData.pagination,
+            first_template: transformedTemplates[0] ? {
+              id: transformedTemplates[0].id,
+              title: transformedTemplates[0].title,
+              category_id: transformedTemplates[0].category_id,
+              subcategory_id: transformedTemplates[0].subcategory_id,
+              status: transformedTemplates[0].status,
+            } : null,
+          },
+        }, '[GET /templates] Sending response to frontend');
+
+        sendPaginated(reply, responseData);
       } catch (error) {
         if (error instanceof ValidationError) {
           sendError(reply, 'VALIDATION_ERROR', error.message, 400, error.details);
@@ -85,13 +167,43 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
   app.get(
     '/templates/:id',
     async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+      const organizationId = request.context!.organizationId;
+      const userId = request.context!.userId;
+      const { id } = request.params;
+
       try {
-        const { id } = request.params;
+        // Log incoming request
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: id,
+        }, '[GET /templates/:id] Request received from frontend');
 
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
-        const template = await service.getById(id, request.context!.organizationId);
+        const template = await service.getById(id, organizationId);
+
+        // Log data fetched from DB
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: id,
+          template_data: {
+            id: template.id,
+            title: (template as any).title || template.name,
+            status: template.status,
+            has_storage_path: !!template.storage_path,
+            has_preview_url: !!template.preview_url,
+          },
+        }, '[GET /templates/:id] Data fetched from database');
+
+        // Log response being sent
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: id,
+        }, '[GET /templates/:id] Sending response to frontend');
 
         sendSuccess(reply, template);
       } catch (error) {
@@ -136,50 +248,105 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       }
 
       try {
-        // Parse multipart form data
-        const data = await request.file();
+        // Parse multipart form data using request.parts() to get both file and form fields
+        // Use Promise.race with timeout to prevent hanging
+        const parts = request.parts();
+        let fileData: any = null;
+        const formFields: Record<string, string> = {};
+
+        // Parse all parts with timeout protection
+        const parsePromise = (async () => {
+          for await (const part of parts) {
+            if (part.type === 'file') {
+              fileData = part;
+            } else {
+              // Form field - read the value
+              try {
+                const value = await part.value;
+                formFields[part.fieldname] = typeof value === 'string' ? value : String(value);
+              } catch (fieldError) {
+                request.log.warn({
+                  userId,
+                  organizationId,
+                  fieldname: part.fieldname,
+                  error: fieldError instanceof Error ? fieldError.message : 'Unknown error',
+                }, '[POST /templates] Failed to read form field');
+              }
+            }
+          }
+        })();
+
+        // Add timeout protection (30 seconds)
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Multipart parsing timeout')), 30000);
+        });
+
+        try {
+          await Promise.race([parsePromise, timeoutPromise]);
+        } catch (parseError) {
+          request.log.error({
+            userId,
+            organizationId,
+            error: parseError instanceof Error ? parseError.message : 'Unknown error',
+          }, '[POST /templates] Error parsing multipart form data');
+          sendError(reply, 'VALIDATION_ERROR', 'Failed to parse form data', 400);
+          return;
+        }
         
-        if (!data) {
+        if (!fileData) {
+          request.log.warn({
+            userId,
+            organizationId,
+          }, '[POST /templates] No file received from frontend');
           sendError(reply, 'VALIDATION_ERROR', 'File is required', 400);
           return;
         }
 
+        // Log incoming request data
+        request.log.info({
+          userId,
+          organizationId,
+          file_info: {
+            filename: fileData.filename,
+            mimetype: fileData.mimetype,
+            encoding: fileData.encoding,
+            fieldname: fileData.fieldname,
+          },
+          form_fields: formFields,
+          form_fields_keys: Object.keys(formFields),
+          has_title: 'title' in formFields,
+          has_category_id: 'category_id' in formFields,
+          has_subcategory_id: 'subcategory_id' in formFields,
+        }, '[POST /templates] Request received from frontend');
+
         // Parse form fields
-        const titleField = data.fields?.title;
-        const categoryIdField = data.fields?.category_id;
-        const subcategoryIdField = data.fields?.subcategory_id;
+        const title = formFields.title?.trim() || '';
+        const categoryId = formFields.category_id?.trim() || '';
+        const subcategoryId = formFields.subcategory_id?.trim() || '';
 
         // Validate title (required, trimmed)
-        let title: string;
-        if (titleField && 'value' in titleField && titleField.value) {
-          title = String(titleField.value).trim();
-        } else {
+        if (title.length === 0) {
           sendError(reply, 'VALIDATION_ERROR', 'Title is required', 400);
           return;
         }
 
         // Validate title length
-        if (title.length === 0) {
-          sendError(reply, 'VALIDATION_ERROR', 'Title is required', 400);
-          return;
-        }
         if (title.length > 255) {
           sendError(reply, 'VALIDATION_ERROR', 'Title must be 255 characters or less', 400);
           return;
         }
 
-        if (!categoryIdField || !('value' in categoryIdField) || !categoryIdField.value) {
+        // Validate category_id
+        if (categoryId.length === 0) {
           sendError(reply, 'VALIDATION_ERROR', 'Category ID is required', 400);
           return;
         }
 
-        if (!subcategoryIdField || !('value' in subcategoryIdField) || !subcategoryIdField.value) {
+        // Validate subcategory_id
+        if (subcategoryId.length === 0) {
           sendError(reply, 'VALIDATION_ERROR', 'Subcategory ID is required', 400);
           return;
         }
-
-        const categoryId = String(categoryIdField.value).trim();
-        const subcategoryId = String(subcategoryIdField.value).trim();
 
         // Validate UUIDs
         const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -193,7 +360,19 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
         }
 
         // Read file buffer
-        const buffer = await data.toBuffer();
+        const buffer = await fileData.toBuffer();
+
+        request.log.info({
+          userId,
+          organizationId,
+          parsed_data: {
+            title,
+            category_id: categoryId,
+            subcategory_id: subcategoryId,
+            file_size_bytes: buffer.length,
+            mimetype: fileData.mimetype ?? 'application/octet-stream',
+          },
+        }, '[POST /templates] Parsed request data, calling service.createWithNewSchema()');
 
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
@@ -208,14 +387,28 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           },
           {
             buffer,
-            mimetype: data.mimetype ?? 'application/octet-stream',
-            originalname: data.filename ?? 'template',
+            mimetype: fileData.mimetype ?? 'application/octet-stream',
+            originalname: fileData.filename ?? 'template',
           }
         );
 
+        // Log data returned from service
+        request.log.info({
+          userId,
+          organizationId,
+          service_result: {
+            template_id: result.template.id,
+            template_title: result.template.title,
+            version_id: result.version.id,
+            version_number: result.version.version_number,
+            source_file_id: result.version.source_file.id,
+            storage_path: result.version.source_file.path,
+          },
+        }, '[POST /templates] Data created in database');
+
         const duration = Date.now() - startTime;
 
-        // Log success
+        // Log success and response being sent
         request.log.info({
           userId,
           organizationId,
@@ -223,7 +416,18 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           version_id: result.version.id,
           storage_path: result.version.source_file.path,
           duration_ms: duration,
-        }, '[POST /templates] Template created successfully');
+          response_data: {
+            template: {
+              id: result.template.id,
+              title: result.template.title,
+              status: result.template.status,
+            },
+            version: {
+              id: result.version.id,
+              version_number: result.version.version_number,
+            },
+          },
+        }, '[POST /templates] Template created successfully, sending response to frontend');
 
         sendSuccess(reply, result, 201);
       } catch (error) {
@@ -403,18 +607,57 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       }
 
       try {
+        // Log incoming request
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+        }, '[GET /templates/:templateId/editor] Request received from frontend');
+
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
         const result = await service.getTemplateForEditor(templateId, organizationId);
 
+        // Log data fetched from DB
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          db_data: {
+            template: {
+              id: result.template.id,
+              title: result.template.title,
+              status: result.template.status,
+            },
+            version: {
+              id: result.latest_version.id,
+              version_number: result.latest_version.version_number,
+              page_count: result.latest_version.page_count,
+            },
+            source_file: result.source_file ? {
+              id: result.source_file.id,
+              bucket: result.source_file.bucket,
+              path: result.source_file.path,
+            } : null,
+            fields_count: result.fields.length,
+            fields: result.fields.map(f => ({
+              id: f.id,
+              field_key: f.field_key,
+              label: f.label,
+              type: f.type,
+            })),
+          },
+        }, '[GET /templates/:templateId/editor] Data fetched from database');
+
+        // Log response being sent
         request.log.info({
           userId,
           organizationId,
           template_id: templateId,
           version_id: result.latest_version.id,
           fields_count: result.fields.length,
-        }, '[GET /templates/:templateId/editor] Successfully fetched template editor data');
+        }, '[GET /templates/:templateId/editor] Sending response to frontend');
 
         sendSuccess(reply, result);
       } catch (error) {
@@ -467,13 +710,51 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       }
 
       try {
+        // Log incoming request
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          version_id: versionId,
+          request_body: request.body,
+        }, '[PUT /templates/:templateId/versions/:versionId/fields] Request received from frontend');
+
         // Parse and validate request body
         const dto = updateFieldsSchema.parse(request.body);
+
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          version_id: versionId,
+          parsed_fields: {
+            fields_count: dto.fields.length,
+            fields: dto.fields.map(f => ({
+              field_key: f.field_key,
+              label: f.label,
+              type: f.type,
+              page_number: f.page_number,
+            })),
+          },
+        }, '[PUT /templates/:templateId/versions/:versionId/fields] Parsed request data, calling service.updateFields()');
 
         const repository = new TemplateRepository(getSupabaseClient());
         const service = new TemplateService(repository);
 
         const result = await service.updateFields(templateId, versionId, organizationId, dto);
+
+        // Log data updated in DB
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          version_id: versionId,
+          db_result: {
+            fields_count: result.fields_count,
+            updated_at: result.updated_at,
+            field_ids: result.fields.map(f => f.id),
+          },
+        }, '[PUT /templates/:templateId/versions/:versionId/fields] Data updated in database');
 
         // Create audit log
         try {

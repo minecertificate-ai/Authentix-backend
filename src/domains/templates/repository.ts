@@ -15,6 +15,11 @@ export class TemplateRepository {
    * Find template by ID
    */
   async findById(id: string, organizationId: string): Promise<TemplateEntity | null> {
+    console.log('[TemplateRepository.findById] Executing DB query', {
+      template_id: id,
+      organizationId,
+    });
+
     const { data, error } = await this.supabase
       .from('certificate_templates')
       .select('*')
@@ -24,10 +29,29 @@ export class TemplateRepository {
       .maybeSingle();
 
     if (error) {
+      console.error('[TemplateRepository.findById] DB query error', {
+        template_id: id,
+        organizationId,
+        error: error.message,
+        error_code: error.code,
+      });
       throw new Error(`Failed to find template: ${error.message}`);
     }
 
-    return data ? this.mapToEntity(data) : null;
+    const result = data ? this.mapToEntity(data) : null;
+
+    console.log('[TemplateRepository.findById] DB query successful', {
+      template_id: id,
+      organizationId,
+      found: !!result,
+      template: result ? {
+        id: result.id,
+        name: result.name,
+        status: result.status,
+      } : null,
+    });
+
+    return result;
   }
 
   /**
@@ -43,9 +67,52 @@ export class TemplateRepository {
       sortOrder?: 'asc' | 'desc';
     } = {}
   ): Promise<{ data: TemplateEntity[]; count: number }> {
+    console.log('[TemplateRepository.findAll] Executing DB query', {
+      organizationId,
+      options,
+    });
+
+    // Select new schema columns and join with categories/subcategories for names
+    // Also join with latest version and preview file
     let query = this.supabase
       .from('certificate_templates')
-      .select('*', { count: 'exact' })
+      .select(`
+        id,
+        organization_id,
+        title,
+        status,
+        category_id,
+        subcategory_id,
+        latest_version_id,
+        created_by_user_id,
+        created_at,
+        updated_at,
+        deleted_at,
+        category:certificate_categories!certificate_templates_category_id_fkey (
+          id,
+          name
+        ),
+        subcategory:certificate_subcategories!certificate_templates_subcategory_id_fkey (
+          id,
+          name
+        ),
+        latest_version:certificate_template_versions!fk_templates_latest_version (
+          id,
+          preview_file_id,
+          source_file_id,
+          preview_file:preview_file_id (
+            id,
+            bucket,
+            path
+          ),
+          source_file:source_file_id (
+            id,
+            bucket,
+            path,
+            mime_type
+          )
+        )
+      `, { count: 'exact' })
       .eq('organization_id', organizationId)
       .is('deleted_at', null);
 
@@ -72,11 +139,43 @@ export class TemplateRepository {
     const { data, error, count } = await query;
 
     if (error) {
+      console.error('[TemplateRepository.findAll] DB query error', {
+        organizationId,
+        error: error.message,
+        error_code: error.code,
+      });
       throw new Error(`Failed to find templates: ${error.message}`);
     }
 
+    // Log raw data to debug preview_file join
+    if (data && data.length > 0) {
+      console.log('[TemplateRepository.findAll] Raw DB data sample', {
+        organizationId,
+        first_template_raw: {
+          id: data[0]?.id,
+          latest_version_id: data[0]?.latest_version_id,
+          latest_version: data[0]?.latest_version ? {
+            id: data[0].latest_version.id,
+            preview_file_id: data[0].latest_version.preview_file_id,
+            preview_file: data[0].latest_version.preview_file,
+          } : null,
+        },
+      });
+    }
+
+    // Map new schema data to entity format
+    const mappedData = (data ?? []).map((item) => this.mapNewSchemaToEntity(item));
+
+    console.log('[TemplateRepository.findAll] DB query successful', {
+      organizationId,
+      rows_returned: mappedData.length,
+      total_count: count ?? 0,
+      template_ids: mappedData.map(t => t.id),
+      templates_with_preview: mappedData.filter(t => (t as any).preview_file).length,
+    });
+
     return {
-      data: (data ?? []).map((item) => this.mapToEntity(item)),
+      data: mappedData,
       count: count ?? 0,
     };
   }
@@ -177,6 +276,77 @@ export class TemplateRepository {
   }
 
   /**
+   * Get all file paths for a template (all versions' source and preview files)
+   * Returns array of { bucket, path } for storage cleanup
+   */
+  async getTemplateFilePaths(templateId: string, organizationId: string): Promise<Array<{ bucket: string; path: string }>> {
+    // First verify template exists and belongs to organization
+    const { data: template, error: templateError } = await this.supabase
+      .from('certificate_templates')
+      .select('id, organization_id')
+      .eq('id', templateId)
+      .eq('organization_id', organizationId)
+      .is('deleted_at', null)
+      .maybeSingle();
+
+    if (templateError) {
+      throw new Error(`[TemplateRepository.getTemplateFilePaths] Failed to verify template: ${templateError.message} (PostgREST code: ${templateError.code || 'unknown'})`);
+    }
+
+    if (!template) {
+      throw new Error(`[TemplateRepository.getTemplateFilePaths] Template not found or does not belong to organization`);
+    }
+
+    // Get all versions for this template
+    const { data: versions, error: versionsError } = await this.supabase
+      .from('certificate_template_versions')
+      .select(`
+        id,
+        source_file_id,
+        preview_file_id,
+        source_file:source_file_id (
+          id,
+          bucket,
+          path
+        ),
+        preview_file:preview_file_id (
+          id,
+          bucket,
+          path
+        )
+      `)
+      .eq('template_id', templateId);
+
+    if (versionsError) {
+      throw new Error(`[TemplateRepository.getTemplateFilePaths] Failed to fetch versions: ${versionsError.message} (PostgREST code: ${versionsError.code || 'unknown'})`);
+    }
+
+    const filePaths: Array<{ bucket: string; path: string }> = [];
+
+    // Collect all file paths from all versions
+    (versions || []).forEach((version: any) => {
+      const sourceFile = version.source_file;
+      const previewFile = version.preview_file;
+
+      if (sourceFile && sourceFile.bucket && sourceFile.path) {
+        filePaths.push({
+          bucket: sourceFile.bucket,
+          path: sourceFile.path,
+        });
+      }
+
+      if (previewFile && previewFile.bucket && previewFile.path) {
+        filePaths.push({
+          bucket: previewFile.bucket,
+          path: previewFile.path,
+        });
+      }
+    });
+
+    return filePaths;
+  }
+
+  /**
    * Get certificate categories for organization
    */
   async getCategories(organizationId: string, industry: string | null): Promise<Array<{
@@ -226,7 +396,7 @@ export class TemplateRepository {
   }
 
   /**
-   * Map database row to entity
+   * Map database row to entity (legacy schema)
    */
   private mapToEntity(row: Record<string, unknown>): TemplateEntity {
     return {
@@ -247,6 +417,70 @@ export class TemplateRepository {
       created_at: row.created_at as string,
       updated_at: row.updated_at as string,
       deleted_at: row.deleted_at as string | null,
+    };
+  }
+
+  /**
+   * Map new schema database row to entity
+   * New schema has: title, category_id, subcategory_id (not name, certificate_category, etc.)
+   */
+  private mapNewSchemaToEntity(row: any): TemplateEntity & { title: string; category_id: string; subcategory_id: string; latest_version_id: string | null; category_name?: string | null; subcategory_name?: string | null; preview_file?: { id: string; bucket: string; path: string } | null } {
+    const category = row.category;
+    const subcategory = row.subcategory;
+    const latestVersion = row.latest_version;
+    const previewFile = latestVersion?.preview_file;
+    const sourceFile = latestVersion?.source_file;
+
+    // Log for debugging
+    if (row.id && !previewFile && latestVersion) {
+      console.log('[TemplateRepository.mapNewSchemaToEntity] Preview file missing', {
+        template_id: row.id,
+        latest_version_id: latestVersion.id,
+        preview_file_id: latestVersion.preview_file_id,
+        has_latest_version: !!latestVersion,
+        latest_version_data: latestVersion,
+      });
+    }
+
+    return {
+      id: row.id as string,
+      organization_id: row.organization_id as string,
+      // Map title to name for backward compatibility with TemplateEntity interface
+      name: row.title as string,
+      // New schema doesn't have these fields, set to null
+      description: null,
+      file_type: 'pdf' as TemplateFileType, // Default, not in new schema
+      storage_path: '', // Not in new schema, fields are in versions
+      preview_url: null, // Will be generated from preview_file if exists
+      status: (row.status as TemplateStatus) ?? 'draft',
+      fields: [], // Fields are in certificate_template_fields table, not here
+      width: null,
+      height: null,
+      // Map category/subcategory IDs and names
+      certificate_category: category?.name as string | null,
+      certificate_subcategory: subcategory?.name as string | null,
+      created_by: row.created_by_user_id as string | null,
+      created_at: row.created_at as string,
+      updated_at: row.updated_at as string,
+      deleted_at: row.deleted_at as string | null,
+      // Add new schema fields as additional properties
+      title: row.title as string,
+      category_id: row.category_id as string,
+      subcategory_id: row.subcategory_id as string,
+      latest_version_id: row.latest_version_id as string | null,
+      category_name: category?.name as string | null,
+      subcategory_name: subcategory?.name as string | null,
+      preview_file: previewFile ? {
+        id: previewFile.id,
+        bucket: previewFile.bucket,
+        path: previewFile.path,
+      } : null,
+      source_file: sourceFile ? {
+        id: sourceFile.id,
+        bucket: sourceFile.bucket,
+        path: sourceFile.path,
+        mime_type: sourceFile.mime_type,
+      } : null,
     };
   }
 
@@ -412,6 +646,11 @@ export class TemplateRepository {
     preview_file: any | null;
     fields: any[];
   } | null> {
+    console.log('[TemplateRepository.getTemplateForEditor] Executing DB queries', {
+      template_id: templateId,
+      organizationId,
+    });
+
     // Query 1: Template with latest version and files
     const { data: templateData, error: templateError } = await this.supabase
       .from('certificate_templates')
@@ -430,12 +669,28 @@ export class TemplateRepository {
       .maybeSingle();
 
     if (templateError) {
+      console.error('[TemplateRepository.getTemplateForEditor] Template query error', {
+        template_id: templateId,
+        organizationId,
+        error: templateError.message,
+        error_code: templateError.code,
+      });
       throw new Error(`[TemplateRepository.getTemplateForEditor] Failed to fetch template: ${templateError.message} (PostgREST code: ${templateError.code || 'unknown'})`);
     }
 
     if (!templateData) {
+      console.log('[TemplateRepository.getTemplateForEditor] Template not found', {
+        template_id: templateId,
+        organizationId,
+      });
       return null;
     }
+
+    console.log('[TemplateRepository.getTemplateForEditor] Template query successful', {
+      template_id: templateId,
+      template: templateData,
+      latest_version_id: templateData.latest_version_id,
+    });
 
     if (!templateData.latest_version_id) {
       // Template exists but no version yet
@@ -513,10 +768,16 @@ export class TemplateRepository {
       .order('created_at', { ascending: true });
 
     if (fieldsError) {
+      console.error('[TemplateRepository.getTemplateForEditor] Fields query error', {
+        template_id: templateId,
+        version_id: versionData.id,
+        error: fieldsError.message,
+        error_code: fieldsError.code,
+      });
       throw new Error(`[TemplateRepository.getTemplateForEditor] Failed to fetch fields: ${fieldsError.message} (PostgREST code: ${fieldsError.code || 'unknown'})`);
     }
 
-    return {
+    const result = {
       template: {
         id: templateData.id,
         title: templateData.title,
@@ -556,6 +817,17 @@ export class TemplateRepository {
         required: field.required,
       })),
     };
+
+    console.log('[TemplateRepository.getTemplateForEditor] All queries successful', {
+      template_id: templateId,
+      organizationId,
+      template: result.template,
+      version: result.version,
+      source_file: result.source_file ? { id: result.source_file.id, path: result.source_file.path } : null,
+      fields_count: result.fields.length,
+    });
+
+    return result;
   }
 
   /**
@@ -566,46 +838,63 @@ export class TemplateRepository {
     versionId: string,
     organizationId: string
   ): Promise<{ template: any; version: any }> {
-    // Query template and version in one go
-    const { data, error } = await this.supabase
-      .from('certificate_templates')
+    // Query version first, then validate it belongs to the template
+    // This avoids PostgREST relationship ambiguity
+    const { data: versionData, error: versionError } = await this.supabase
+      .from('certificate_template_versions')
       .select(`
         id,
-        organization_id,
-        certificate_template_versions!inner (
+        template_id,
+        page_count,
+        certificate_templates!inner (
           id,
-          template_id,
-          page_count
+          organization_id
         )
       `)
-      .eq('id', templateId)
-      .eq('organization_id', organizationId)
-      .eq('certificate_template_versions.id', versionId)
-      .is('deleted_at', null)
+      .eq('id', versionId)
+      .eq('template_id', templateId)
       .maybeSingle();
 
-    if (error && error.code !== 'PGRST116') {
-      throw new Error(`[TemplateRepository.validateTemplateAndVersion] Failed to validate: ${error.message} (PostgREST code: ${error.code || 'unknown'})`);
+    if (versionError && versionError.code !== 'PGRST116') {
+      throw new Error(`[TemplateRepository.validateTemplateAndVersion] Failed to validate: ${versionError.message} (PostgREST code: ${versionError.code || 'unknown'})`);
     }
 
-    if (!data) {
+    if (!versionData) {
       return { template: null, version: null };
     }
 
-    const version = (data as any).certificate_template_versions;
-    if (!version || Array.isArray(version) || version.template_id !== templateId) {
+    const template = (versionData as any).certificate_templates;
+    if (!template || Array.isArray(template)) {
+      return { template: null, version: null };
+    }
+
+    // Verify template belongs to organization
+    if (template.organization_id !== organizationId) {
+      return { template: null, version: null };
+    }
+
+    // Verify template is not deleted
+    const { data: templateData, error: templateError } = await this.supabase
+      .from('certificate_templates')
+      .select('id, organization_id')
+      .eq('id', templateId)
+      .eq('organization_id', organizationId)
+      .is('deleted_at', null)
+      .maybeSingle();
+
+    if (templateError || !templateData) {
       return { template: null, version: null };
     }
 
     return {
       template: {
-        id: data.id,
-        organization_id: data.organization_id,
+        id: templateData.id,
+        organization_id: templateData.organization_id,
       },
       version: {
-        id: version.id,
-        template_id: version.template_id,
-        page_count: version.page_count,
+        id: versionData.id,
+        template_id: versionData.template_id,
+        page_count: versionData.page_count,
       },
     };
   }
