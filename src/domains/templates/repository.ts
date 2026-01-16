@@ -2,10 +2,17 @@
  * TEMPLATE REPOSITORY
  *
  * Data access layer for certificate templates.
+ *
+ * SOFT DELETE PATTERN:
+ * - Templates are never physically deleted from the database
+ * - When deleted, `deleted_at` is set to a timestamp
+ * - All queries use `.is('deleted_at', null)` to filter out deleted templates
+ * - This allows for data recovery and audit trails
+ * - Only non-deleted templates are returned to users
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { TemplateEntity, CreateTemplateDTO, UpdateTemplateDTO, TemplateFileType, TemplateStatus, CertificateField } from './types.js';
+import type { TemplateEntity, CreateTemplateDTO, UpdateTemplateDTO, TemplateFileType, CertificateField } from './types.js';
 import { NotFoundError } from '../../lib/errors/handler.js';
 
 export class TemplateRepository {
@@ -20,12 +27,14 @@ export class TemplateRepository {
       organizationId,
     });
 
+    // Soft delete pattern: .is('deleted_at', null) filters out deleted templates
+    // deleted_at is set to a timestamp when template is soft-deleted
     const { data, error } = await this.supabase
       .from('certificate_templates')
       .select('*')
       .eq('id', id)
       .eq('organization_id', organizationId)
-      .is('deleted_at', null)
+      .is('deleted_at', null) // Only return non-deleted templates
       .maybeSingle();
 
     if (error) {
@@ -47,7 +56,6 @@ export class TemplateRepository {
       template: result ? {
         id: result.id,
         name: result.name,
-        status: result.status,
       } : null,
     });
 
@@ -60,7 +68,6 @@ export class TemplateRepository {
   async findAll(
     organizationId: string,
     options: {
-      status?: string;
       limit?: number;
       offset?: number;
       sortBy?: string;
@@ -74,13 +81,13 @@ export class TemplateRepository {
 
     // Select new schema columns and join with categories/subcategories for names
     // Also join with latest version and preview file
+    // Note: Status filtering removed - all templates are active and ready to use
     let query = this.supabase
       .from('certificate_templates')
       .select(`
         id,
         organization_id,
         title,
-        status,
         category_id,
         subcategory_id,
         latest_version_id,
@@ -114,11 +121,7 @@ export class TemplateRepository {
         )
       `, { count: 'exact' })
       .eq('organization_id', organizationId)
-      .is('deleted_at', null);
-
-    if (options.status) {
-      query = query.eq('status', options.status);
-    }
+      .is('deleted_at', null); // Soft delete: only return templates where deleted_at is NULL (not deleted)
 
     if (options.sortBy) {
       query = query.order(options.sortBy, {
@@ -199,7 +202,7 @@ export class TemplateRepository {
         file_type: dto.file_type,
         storage_path: storagePath,
         preview_url: previewUrl,
-        status: dto.status ?? 'active',
+        // status: removed - all templates are active and ready to use
         fields: dto.fields,
         width: dto.width ?? null,
         height: dto.height ?? null,
@@ -231,7 +234,7 @@ export class TemplateRepository {
 
     if (dto.name !== undefined) updateData.name = dto.name;
     if (dto.description !== undefined) updateData.description = dto.description;
-    if (dto.status !== undefined) updateData.status = dto.status;
+    // status removed - templates are always active and ready to use
     if (dto.fields !== undefined) updateData.fields = dto.fields;
     if (dto.width !== undefined) updateData.width = dto.width;
     if (dto.height !== undefined) updateData.height = dto.height;
@@ -241,7 +244,7 @@ export class TemplateRepository {
       .update(updateData)
       .eq('id', id)
       .eq('organization_id', organizationId)
-      .is('deleted_at', null)
+      .is('deleted_at', null) // Soft delete: can only update non-deleted templates
       .select()
       .single();
 
@@ -258,17 +261,19 @@ export class TemplateRepository {
 
   /**
    * Soft delete template
+   * Sets deleted_at timestamp to mark template as deleted
+   * All queries use .is('deleted_at', null) to filter out deleted templates
    */
   async delete(id: string, organizationId: string): Promise<void> {
     const { error } = await this.supabase
       .from('certificate_templates')
       .update({
         deleted_at: new Date().toISOString(),
-        status: 'archived',
-      })
+        // Note: status removed - templates are always active when not deleted
+      } as any)
       .eq('id', id)
       .eq('organization_id', organizationId)
-      .is('deleted_at', null);
+      .is('deleted_at', null); // Only delete if not already deleted
 
     if (error) {
       throw new Error(`Failed to delete template: ${error.message}`);
@@ -407,7 +412,7 @@ export class TemplateRepository {
       file_type: row.file_type as TemplateFileType,
       storage_path: row.storage_path as string,
       preview_url: row.preview_url as string | null,
-      status: (row.status as TemplateStatus) ?? 'draft',
+      // status: removed - all templates are active and ready to use
       fields: (row.fields as CertificateField[]) ?? [],
       width: row.width as number | null,
       height: row.height as number | null,
@@ -452,7 +457,7 @@ export class TemplateRepository {
       file_type: 'pdf' as TemplateFileType, // Default, not in new schema
       storage_path: '', // Not in new schema, fields are in versions
       preview_url: null, // Will be generated from preview_file if exists
-      status: (row.status as TemplateStatus) ?? 'draft',
+      // status: removed - all templates are active and ready to use
       fields: [], // Fields are in certificate_template_fields table, not here
       width: null,
       height: null,
@@ -496,7 +501,8 @@ export class TemplateRepository {
       subcategory_id: string;
     }
   ): Promise<{ template_id: string }> {
-    // Create template record first (status draft, latest_version_id NULL)
+    // Create template record first (latest_version_id NULL initially)
+    // Note: status column removed - all templates are active and ready to use
     const { data, error } = await this.supabase
       .from('certificate_templates')
       .insert({
@@ -504,7 +510,7 @@ export class TemplateRepository {
         category_id: dto.category_id,
         subcategory_id: dto.subcategory_id,
         title: dto.title,
-        status: 'draft',
+        // status: removed - all templates are active and ready to use
         created_by_user_id: userId,
       } as any)
       .select('id')
@@ -657,7 +663,6 @@ export class TemplateRepository {
       .select(`
         id,
         title,
-        status,
         category_id,
         subcategory_id,
         created_at,
@@ -745,7 +750,7 @@ export class TemplateRepository {
         template: {
           id: templateData.id,
           title: templateData.title,
-          status: templateData.status,
+          // status: removed - all templates are active and ready to use
           category_id: templateData.category_id,
           subcategory_id: templateData.subcategory_id,
           created_at: templateData.created_at,
@@ -781,7 +786,7 @@ export class TemplateRepository {
       template: {
         id: templateData.id,
         title: templateData.title,
-        status: templateData.status,
+        // status: removed - all templates are active and ready to use
         category_id: templateData.category_id,
         subcategory_id: templateData.subcategory_id,
         created_at: templateData.created_at,

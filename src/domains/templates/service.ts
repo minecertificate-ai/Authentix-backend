@@ -40,7 +40,7 @@ export class TemplateService {
       template: {
         id: template.id,
         name: template.name,
-        status: template.status,
+        // status: removed - all templates are active and ready to use
         has_storage_path: !!template.storage_path,
       },
     });
@@ -54,7 +54,6 @@ export class TemplateService {
   async list(
     organizationId: string,
     options: {
-      status?: string;
       page?: number;
       limit?: number;
       sortBy?: string;
@@ -69,7 +68,6 @@ export class TemplateService {
     console.log('[TemplateService.list] Calling repository.findAll()', {
       organizationId,
       options: {
-        status: options.status,
         limit,
         offset,
         sortBy: options.sortBy,
@@ -77,8 +75,8 @@ export class TemplateService {
       },
     });
 
+    // Note: Status filtering removed - all templates are active and ready to use
     const { data, count } = await this.repository.findAll(organizationId, {
-      status: options.status,
       limit,
       offset,
       sortBy: options.sortBy,
@@ -931,7 +929,7 @@ export class TemplateService {
 
       const { data: templateData, error: templateFetchError } = await supabase
         .from('certificate_templates')
-        .select('id, title, status, category_id, subcategory_id, latest_version_id, created_at')
+        .select('id, title, category_id, subcategory_id, latest_version_id, created_at')
         .eq('id', template_id)
         .single();
 
@@ -961,7 +959,7 @@ export class TemplateService {
       type TemplateRow = {
         id: string;
         title: string;
-        status: string;
+        // status: removed - all templates are active and ready to use
         category_id: string;
         subcategory_id: string;
         latest_version_id: string | null;
@@ -983,7 +981,7 @@ export class TemplateService {
         template: {
           id: typedTemplateData.id,
           title: typedTemplateData.title,
-          status: typedTemplateData.status,
+          // status: removed - all templates are active and ready to use
           category_id: typedTemplateData.category_id,
           subcategory_id: typedTemplateData.subcategory_id,
           latest_version_id: typedTemplateData.latest_version_id,
@@ -1068,7 +1066,7 @@ export class TemplateService {
       template: {
         id: data.template.id,
         title: data.template.title,
-        status: data.template.status,
+        // status: removed - all templates are active and ready to use
       },
       version: {
         id: data.version.id,

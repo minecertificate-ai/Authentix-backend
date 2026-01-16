@@ -28,13 +28,6 @@ export const certificateFieldSchema = z.object({
 export type CertificateField = z.infer<typeof certificateFieldSchema>;
 
 /**
- * Template status
- */
-export const templateStatusSchema = z.enum(['draft', 'active', 'archived']);
-
-export type TemplateStatus = z.infer<typeof templateStatusSchema>;
-
-/**
  * Template file type
  */
 export const templateFileTypeSchema = z.enum(['pdf', 'png', 'jpg', 'jpeg']);
@@ -53,18 +46,19 @@ export const createTemplateSchema = z.object({
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   fields: z.array(certificateFieldSchema).default([]),
-  status: templateStatusSchema.optional().default('active'),
+  // status: removed - all templates are active and ready to use
 });
 
 export type CreateTemplateDTO = z.infer<typeof createTemplateSchema>;
 
 /**
  * Update template DTO
+ * Note: Status removed - all templates are active and ready to use
  */
 export const updateTemplateSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   description: z.string().max(1000).optional(),
-  status: templateStatusSchema.optional(),
+  // status: removed - templates are always active when uploaded
   fields: z.array(certificateFieldSchema).optional(),
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
@@ -83,7 +77,7 @@ export interface TemplateEntity {
   file_type: TemplateFileType;
   storage_path: string;
   preview_url: string | null;
-  status: TemplateStatus;
+  // status: removed - all templates are active and ready to use
   fields: CertificateField[];
   width: number | null;
   height: number | null;
@@ -129,7 +123,7 @@ export interface TemplateEditorData {
   template: {
     id: string;
     title: string;
-    status: string;
+    // status: removed - all templates are active and ready to use
     category_id: string;
     subcategory_id: string;
     created_at: string;

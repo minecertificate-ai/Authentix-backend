@@ -31,8 +31,8 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
    * List all templates for the authenticated organization
    * Query params:
    *   - include: comma-separated list of fields to include (e.g., "preview_url")
-   *   - status: filter by status
    *   - page, limit, sort_by, sort_order: pagination options
+   * Note: All templates are active and ready to use (status filtering removed)
    */
   app.get(
     '/templates',
@@ -42,8 +42,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       
       try {
         const { page, limit, sort_by, sort_order } = parsePagination(request.query);
-        const query = request.query as { status?: string; include?: string };
-        const status = query.status;
+        const query = request.query as { include?: string };
         const include = query.include;
 
         // Log incoming request data
@@ -55,7 +54,6 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
             limit,
             sort_by,
             sort_order,
-            status,
             include,
           },
         }, '[GET /templates] Request received from frontend');
@@ -70,7 +68,6 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           userId,
           organizationId,
           service_options: {
-            status,
             page,
             limit,
             sortBy: sort_by,
@@ -79,8 +76,8 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           },
         }, '[GET /templates] Calling service.list()');
 
+        // Note: Status filtering removed - all templates are active and ready to use
         const { templates, total } = await service.list(organizationId, {
-          status,
           page,
           limit,
           sortBy: sort_by,
@@ -192,7 +189,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
           template_data: {
             id: template.id,
             title: (template as any).title || template.name,
-            status: template.status,
+            // status: removed - all templates are active and ready to use
             has_storage_path: !!template.storage_path,
             has_preview_url: !!template.preview_url,
           },
@@ -420,7 +417,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
             template: {
               id: result.template.id,
               title: result.template.title,
-              status: result.template.status,
+              // status: removed - all templates are active and ready to use
             },
             version: {
               id: result.version.id,
@@ -628,7 +625,7 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
             template: {
               id: result.template.id,
               title: result.template.title,
-              status: result.template.status,
+              // status: removed - all templates are active and ready to use
             },
             version: {
               id: result.latest_version.id,
