@@ -14,13 +14,39 @@ export class ImportRepository {
   /**
    * Find import job by ID
    */
-  async findById(id: string, companyId: string): Promise<ImportJobEntity | null> {
+  async findById(id: string, organizationId: string): Promise<ImportJobEntity | null> {
     const { data, error } = await this.supabase
-      .from('import_jobs')
-      .select('*')
+      .from('file_import_jobs')
+      .select(`
+        id,
+        organization_id,
+        template_id,
+        template_version_id,
+        category_id,
+        subcategory_id,
+        source_file_id,
+        source_format,
+        mapping,
+        status,
+        row_count,
+        success_count,
+        failed_count,
+        created_by_user_id,
+        created_at,
+        updated_at,
+        completed_at,
+        error,
+        source_file:source_file_id (
+          id,
+          original_name,
+          mime_type,
+          size_bytes,
+          bucket,
+          path
+        )
+      `)
       .eq('id', id)
-      .eq('company_id', companyId)
-      .is('deleted_at', null)
+      .eq('organization_id', organizationId)
       .maybeSingle();
 
     if (error) {
@@ -31,10 +57,10 @@ export class ImportRepository {
   }
 
   /**
-   * Find all import jobs for company
+   * Find all import jobs for organization
    */
   async findAll(
-    companyId: string,
+    organizationId: string,
     options: {
       status?: string;
       limit?: number;
@@ -44,10 +70,36 @@ export class ImportRepository {
     } = {}
   ): Promise<{ data: ImportJobEntity[]; count: number }> {
     let query = this.supabase
-      .from('import_jobs')
-      .select('*', { count: 'exact' })
-      .eq('company_id', companyId)
-      .is('deleted_at', null);
+      .from('file_import_jobs')
+      .select(`
+        id,
+        organization_id,
+        template_id,
+        template_version_id,
+        category_id,
+        subcategory_id,
+        source_file_id,
+        source_format,
+        mapping,
+        status,
+        row_count,
+        success_count,
+        failed_count,
+        created_by_user_id,
+        created_at,
+        updated_at,
+        completed_at,
+        error,
+        source_file:source_file_id (
+          id,
+          original_name,
+          mime_type,
+          size_bytes,
+          bucket,
+          path
+        )
+      `, { count: 'exact' })
+      .eq('organization_id', organizationId);
 
     if (options.status) {
       query = query.eq('status', options.status);
@@ -88,7 +140,7 @@ export class ImportRepository {
    * Create import job
    */
   async create(
-    companyId: string,
+    organizationId: string,
     userId: string,
     dto: {
       file_name: string;
@@ -103,10 +155,10 @@ export class ImportRepository {
     }
   ): Promise<ImportJobEntity> {
     const { data, error } = await this.supabase
-      .from('import_jobs')
+      .from('file_import_jobs')
       .insert({
-        company_id: companyId,
-        created_by: userId,
+        organization_id: organizationId,
+        created_by_user_id: userId,
         file_name: dto.file_name,
         storage_path: dto.storage_path,
         file_storage_path: dto.file_storage_path,
@@ -139,7 +191,7 @@ export class ImportRepository {
    */
   async update(
     id: string,
-    companyId: string,
+    organizationId: string,
     updates: {
       status?: string;
       success_count?: number;
@@ -161,10 +213,10 @@ export class ImportRepository {
     };
 
     const { data, error } = await this.supabase
-      .from('import_jobs')
+      .from('file_import_jobs')
       .update(updateData)
       .eq('id', id)
-      .eq('company_id', companyId)
+      .eq('organization_id', organizationId)
       .is('deleted_at', null)
       .select()
       .single();
@@ -184,20 +236,20 @@ export class ImportRepository {
    * Store import data rows
    */
   async storeDataRows(
-    companyId: string,
+    organizationId: string,
     importJobId: string,
     rows: Array<{ row_number: number; data: Record<string, unknown> }>
   ): Promise<void> {
     const rowsToInsert = rows.map((row) => ({
       import_job_id: importJobId,
-      company_id: companyId,
+      organization_id: organizationId,
       row_number: row.row_number,
       data: row.data,
       is_deleted: false,
     }));
 
     const { error } = await this.supabase
-      .from('import_data_rows')
+      .from('file_import_rows')
       .insert(rowsToInsert);
 
     if (error) {
@@ -210,17 +262,17 @@ export class ImportRepository {
    */
   async getDataRows(
     importJobId: string,
-    companyId: string,
+    organizationId: string,
     options: {
       limit?: number;
       offset?: number;
     } = {}
   ): Promise<{ data: ImportDataRowEntity[]; count: number }> {
     let query = this.supabase
-      .from('import_data_rows')
+      .from('file_import_rows')
       .select('*', { count: 'exact' })
       .eq('import_job_id', importJobId)
-      .eq('company_id', companyId)
+      .eq('organization_id', organizationId)
       .eq('is_deleted', false)
       .order('row_number', { ascending: true });
 
@@ -253,32 +305,26 @@ export class ImportRepository {
   private mapToEntity(row: Record<string, unknown>): ImportJobEntity {
     return {
       id: row.id as string,
-      company_id: row.company_id as string,
-      created_by: row.created_by as string | null,
-      file_name: row.file_name as string,
-      storage_path: row.storage_path as string,
-      file_storage_path: row.file_storage_path as string | null,
+      organization_id: row.organization_id as string,
+      created_by_user_id: row.created_by_user_id as string | null,
+      file_name: row.file_name as string | null,
+      file_type: row.file_type as string | null,
+      file_size: row.file_size as number | null,
       status: (row.status as ImportJobStatus) ?? 'pending',
-      total_rows: (row.total_rows as number) ?? 0,
       success_count: (row.success_count as number) ?? 0,
-      failure_count: (row.failure_count as number) ?? 0,
-      processed_rows: (row.processed_rows as number) ?? 0,
-      succeeded_rows: (row.succeeded_rows as number) ?? 0,
-      failed_rows: (row.failed_rows as number) ?? 0,
+      failed_count: (row.failed_count as number) ?? 0,
+      total_rows: (row.total_rows as number) ?? 0,
       error_message: row.error_message as string | null,
-      errors: row.errors as Record<string, unknown> | null,
       mapping: row.mapping as Record<string, unknown> | null,
       source_type: (row.source_type as ImportSourceType) ?? 'csv',
-      data_persisted: (row.data_persisted as boolean) ?? false,
       reusable: (row.reusable as boolean) ?? true,
-      certificate_category_id: row.certificate_category_id as string | null,
-      certificate_subcategory_id: row.certificate_subcategory_id as string | null,
-      template_id: row.template_id as string | null,
-      started_at: row.started_at as string | null,
+      category_id: row.category_id as string | null,
+      subcategory_id: row.subcategory_id as string | null,
+      template_id: (row.template_id as string) || '',
+      template_version_id: (row.template_version_id as string) || '',
       completed_at: row.completed_at as string | null,
       created_at: row.created_at as string,
       updated_at: row.updated_at as string,
-      deleted_at: row.deleted_at as string | null,
     };
   }
 
@@ -289,12 +335,11 @@ export class ImportRepository {
     return {
       id: row.id as string,
       import_job_id: row.import_job_id as string,
-      company_id: row.company_id as string,
-      row_number: row.row_number as number,
+      row_index: row.row_index as number,
       data: row.data as Record<string, unknown>,
-      is_deleted: (row.is_deleted as boolean) ?? false,
-      deleted_at: row.deleted_at as string | null,
-      deleted_by: row.deleted_by as string | null,
+      raw_data: row.raw_data as Record<string, unknown> | null,
+      status: row.status as string,
+      errors: row.errors as Record<string, unknown> | null,
       created_at: row.created_at as string,
     };
   }

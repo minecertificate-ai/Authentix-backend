@@ -18,8 +18,8 @@ export class ImportService {
   /**
    * Get import job by ID
    */
-  async getById(id: string, companyId: string): Promise<ImportJobEntity> {
-    const job = await this.repository.findById(id, companyId);
+  async getById(id: string, organizationId: string): Promise<ImportJobEntity> {
+    const job = await this.repository.findById(id, organizationId);
 
     if (!job) {
       throw new NotFoundError('Import job not found');
@@ -32,7 +32,7 @@ export class ImportService {
    * List import jobs
    */
   async list(
-    companyId: string,
+    organizationId: string,
     options: {
       status?: string;
       page?: number;
@@ -45,7 +45,7 @@ export class ImportService {
     const page = options.page ?? 1;
     const offset = (page - 1) * limit;
 
-    const { data, count } = await this.repository.findAll(companyId, {
+    const { data, count } = await this.repository.findAll(organizationId, {
       status: options.status,
       limit,
       offset,
@@ -64,7 +64,7 @@ export class ImportService {
    * Uses magic byte validation for security (OWASP compliant)
    */
   async create(
-    companyId: string,
+    organizationId: string,
     userId: string,
     dto: CreateImportJobDTO,
     file: { buffer: Buffer; mimetype: string; originalname: string }
@@ -120,10 +120,10 @@ export class ImportService {
 
     // Generate secure filename (never trust client input)
     const secureFilename = generateSecureFilename(validatedMimetype);
-    const storagePath = `imports/${companyId}/${secureFilename}`;
+    const storagePath = `file_imports/${organizationId}/${secureFilename}`;
 
     const { error: uploadError } = await supabase.storage
-      .from('minecertificate')
+      .from('authentix')
       .upload(storagePath, file.buffer, {
         contentType: validatedMimetype, // Use validated mimetype
         upsert: false,
@@ -134,7 +134,7 @@ export class ImportService {
     }
 
     // Create import job
-    const job = await this.repository.create(companyId, userId, {
+    const job = await this.repository.create(organizationId, userId, {
       file_name: dto.file_name,
       storage_path: storagePath,
       file_storage_path: storagePath,
@@ -154,10 +154,10 @@ export class ImportService {
           data: row,
         }));
 
-        await this.repository.storeDataRows(companyId, job.id, rowsToStore);
+        await this.repository.storeDataRows(organizationId, job.id, rowsToStore);
 
         // Update job to mark data as persisted
-        await this.repository.update(job.id, companyId, {
+        await this.repository.update(job.id, organizationId, {
           data_persisted: true,
         });
       } catch (error) {
@@ -174,14 +174,14 @@ export class ImportService {
    */
   async getDataRows(
     importJobId: string,
-    companyId: string,
+    organizationId: string,
     options: {
       page?: number;
       limit?: number;
     } = {}
   ): Promise<{ rows: Array<{ row_number: number; data: Record<string, unknown> }>; total: number }> {
     // Verify job exists
-    await this.getById(importJobId, companyId);
+    await this.getById(importJobId, organizationId);
 
     const limit = options.limit ?? 100;
     const page = options.page ?? 1;
@@ -189,7 +189,7 @@ export class ImportService {
 
     const { data, count } = await this.repository.getDataRows(
       importJobId,
-      companyId,
+      organizationId,
       { limit, offset }
     );
 
@@ -205,8 +205,8 @@ export class ImportService {
   /**
    * Get signed URL for import file download
    */
-  async getFileUrl(importJobId: string, companyId: string): Promise<string> {
-    const job = await this.getById(importJobId, companyId);
+  async getFileUrl(importJobId: string, organizationId: string): Promise<string> {
+    const job = await this.getById(importJobId, organizationId);
 
     if (!job.file_storage_path) {
       throw new NotFoundError('Import file not found');
@@ -214,7 +214,7 @@ export class ImportService {
 
     const supabase = getSupabaseClient();
     const { data } = await supabase.storage
-      .from('minecertificate')
+      .from('authentix')
       .createSignedUrl(job.file_storage_path, 3600);
 
     if (!data) {

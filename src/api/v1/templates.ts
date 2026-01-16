@@ -537,10 +537,11 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
 
         const previewUrl = await service.getPreviewUrl(id, request.context!.organizationId);
 
-        sendSuccess(reply, { preview_url: previewUrl });
+        sendSuccess(reply, { url: previewUrl });
       } catch (error) {
         if (error instanceof NotFoundError) {
-          sendError(reply, 'NOT_FOUND', error.message, 404);
+          // Return a more specific error code for missing preview
+          sendError(reply, 'TEMPLATE_PREVIEW_NOT_AVAILABLE', 'Template preview not available', 404);
         } else {
           request.log.error(error, 'Failed to get preview URL');
           sendError(reply, 'INTERNAL_ERROR', 'Failed to get preview URL', 500);

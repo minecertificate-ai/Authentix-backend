@@ -465,6 +465,11 @@ export class TemplateService {
     }
 
     const templateWithPreview = template as any;
+
+    // Legacy fallback: use stored preview_url if present
+    if (templateWithPreview.preview_url) {
+      return templateWithPreview.preview_url as string;
+    }
     
     // Try to get preview from latest version's preview_file
     if (templateWithPreview.preview_file?.path && templateWithPreview.preview_file?.bucket) {

@@ -9,7 +9,7 @@ import { z } from 'zod';
 /**
  * Import source type
  */
-export const importSourceTypeSchema = z.enum(['csv', 'excel', 'api']);
+export const importSourceTypeSchema = z.enum(['csv', 'excel']);
 
 export type ImportSourceType = z.infer<typeof importSourceTypeSchema>;
 
@@ -17,7 +17,7 @@ export type ImportSourceType = z.infer<typeof importSourceTypeSchema>;
  * Import job status
  */
 export const importJobStatusSchema = z.enum([
-  'pending',
+  'queued',
   'processing',
   'completed',
   'failed',
@@ -33,6 +33,7 @@ export const createImportJobSchema = z.object({
   certificate_category: z.string().optional(),
   certificate_subcategory: z.string().optional(),
   template_id: z.string().uuid().optional(),
+  certificate_template_id: z.string().uuid().optional(),
   reusable: z.boolean().default(true),
 });
 
@@ -43,32 +44,26 @@ export type CreateImportJobDTO = z.infer<typeof createImportJobSchema>;
  */
 export interface ImportJobEntity {
   id: string;
-  company_id: string;
-  created_by: string | null;
-  file_name: string;
-  storage_path: string;
-  file_storage_path: string | null;
+  organization_id: string;
+  created_by_user_id: string | null;
+  file_name: string | null;
+  file_type: string | null;
+  file_size: number | null;
   status: ImportJobStatus;
-  total_rows: number;
   success_count: number;
-  failure_count: number;
-  processed_rows: number;
-  succeeded_rows: number;
-  failed_rows: number;
+  failed_count: number;
+  total_rows: number;
   error_message: string | null;
-  errors: Record<string, unknown> | null;
   mapping: Record<string, unknown> | null;
   source_type: ImportSourceType;
-  data_persisted: boolean;
   reusable: boolean;
-  certificate_category_id: string | null;
-  certificate_subcategory_id: string | null;
-  template_id: string | null;
-  started_at: string | null;
+  category_id: string | null;
+  subcategory_id: string | null;
+  template_id: string;
+  template_version_id: string;
   completed_at: string | null;
   created_at: string;
   updated_at: string;
-  deleted_at: string | null;
 }
 
 /**
@@ -77,11 +72,10 @@ export interface ImportJobEntity {
 export interface ImportDataRowEntity {
   id: string;
   import_job_id: string;
-  company_id: string;
-  row_number: number;
+  row_index: number;
   data: Record<string, unknown>;
-  is_deleted: boolean;
-  deleted_at: string | null;
-  deleted_by: string | null;
+  raw_data: Record<string, unknown> | null;
+  status: string;
+  errors: Record<string, unknown> | null;
   created_at: string;
 }

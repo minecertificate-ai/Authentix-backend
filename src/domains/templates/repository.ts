@@ -29,9 +29,45 @@ export class TemplateRepository {
 
     // Soft delete pattern: .is('deleted_at', null) filters out deleted templates
     // deleted_at is set to a timestamp when template is soft-deleted
+    // Join latest version + files to support preview URL generation
     const { data, error } = await this.supabase
       .from('certificate_templates')
-      .select('*')
+      .select(`
+        id,
+        organization_id,
+        title,
+        category_id,
+        subcategory_id,
+        latest_version_id,
+        created_by_user_id,
+        created_at,
+        updated_at,
+        deleted_at,
+        category:certificate_categories!certificate_templates_category_id_fkey (
+          id,
+          name
+        ),
+        subcategory:certificate_subcategories!certificate_templates_subcategory_id_fkey (
+          id,
+          name
+        ),
+        latest_version:certificate_template_versions!fk_templates_latest_version (
+          id,
+          preview_file_id,
+          source_file_id,
+          preview_file:preview_file_id (
+            id,
+            bucket,
+            path
+          ),
+          source_file:source_file_id (
+            id,
+            bucket,
+            path,
+            mime_type
+          )
+        )
+      `)
       .eq('id', id)
       .eq('organization_id', organizationId)
       .is('deleted_at', null) // Only return non-deleted templates
@@ -47,7 +83,7 @@ export class TemplateRepository {
       throw new Error(`Failed to find template: ${error.message}`);
     }
 
-    const result = data ? this.mapToEntity(data) : null;
+    const result = data ? this.mapNewSchemaToEntity(data) : null;
 
     console.log('[TemplateRepository.findById] DB query successful', {
       template_id: id,
@@ -222,41 +258,72 @@ export class TemplateRepository {
 
   /**
    * Update template
+   * Note: In new schema, fields are stored in certificate_template_fields table
+   * and dimensions are not stored on template. This method handles legacy updates
+   * and ignores fields/dimensions for new schema templates.
    */
   async update(
     id: string,
     organizationId: string,
     dto: UpdateTemplateDTO
   ): Promise<TemplateEntity> {
+    // Check if template exists and get its latest_version_id
+    const { data: templateData, error: templateCheckError } = await this.supabase
+      .from('certificate_templates')
+      .select('id, latest_version_id')
+      .eq('id', id)
+      .eq('organization_id', organizationId)
+      .is('deleted_at', null)
+      .maybeSingle();
+
+    if (templateCheckError) {
+      throw new Error(`Failed to check template: ${templateCheckError.message}`);
+    }
+
+    if (!templateData) {
+      throw new NotFoundError('Template not found');
+    }
+
     const updateData: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
 
-    if (dto.name !== undefined) updateData.name = dto.name;
-    if (dto.description !== undefined) updateData.description = dto.description;
-    // status removed - templates are always active and ready to use
-    if (dto.fields !== undefined) updateData.fields = dto.fields;
-    if (dto.width !== undefined) updateData.width = dto.width;
-    if (dto.height !== undefined) updateData.height = dto.height;
-
-    const { data, error } = await this.supabase
-      .from('certificate_templates')
-      .update(updateData)
-      .eq('id', id)
-      .eq('organization_id', organizationId)
-      .is('deleted_at', null) // Soft delete: can only update non-deleted templates
-      .select()
-      .single();
-
-    if (error) {
-      throw new Error(`Failed to update template: ${error.message}`);
+    // Only update title if provided (new schema uses title, not name)
+    if (dto.name !== undefined) {
+      updateData.title = dto.name;
     }
 
-    if (!data) {
-      throw new NotFoundError('Template not found');
+    // Note: In new schema:
+    // - fields are stored in certificate_template_fields (use updateFields endpoint)
+    // - width/height are not stored on template (they're in the source file metadata)
+    // - description is not in new schema
+    // We ignore these fields for new schema templates
+
+    // Only update if there's something to update
+    if (Object.keys(updateData).length > 1) { // More than just updated_at
+      const { data, error } = await this.supabase
+        .from('certificate_templates')
+        .update(updateData)
+        .eq('id', id)
+        .eq('organization_id', organizationId)
+        .is('deleted_at', null)
+        .select()
+        .single();
+
+      if (error) {
+        throw new Error(`Failed to update template: ${error.message}`);
+      }
+
+      if (!data) {
+        throw new NotFoundError('Template not found');
+      }
+
+      // Fetch full template data for response
+      return await this.findById(id, organizationId) as TemplateEntity;
     }
 
-    return this.mapToEntity(data);
+    // If nothing to update, just return the template
+    return await this.findById(id, organizationId) as TemplateEntity;
   }
 
   /**
@@ -889,19 +956,10 @@ export class TemplateRepository {
     versionId: string,
     organizationId: string
   ): Promise<{ template: any; version: any }> {
-    // Query version first, then validate it belongs to the template
-    // This avoids PostgREST relationship ambiguity
+    // Query version first (without embedding to avoid PostgREST relationship ambiguity)
     const { data: versionData, error: versionError } = await this.supabase
       .from('certificate_template_versions')
-      .select(`
-        id,
-        template_id,
-        page_count,
-        certificate_templates!inner (
-          id,
-          organization_id
-        )
-      `)
+      .select('id, template_id, page_count')
       .eq('id', versionId)
       .eq('template_id', templateId)
       .maybeSingle();
@@ -914,17 +972,7 @@ export class TemplateRepository {
       return { template: null, version: null };
     }
 
-    const template = (versionData as any).certificate_templates;
-    if (!template || Array.isArray(template)) {
-      return { template: null, version: null };
-    }
-
-    // Verify template belongs to organization
-    if (template.organization_id !== organizationId) {
-      return { template: null, version: null };
-    }
-
-    // Verify template is not deleted
+    // Verify template belongs to organization and is not deleted
     const { data: templateData, error: templateError } = await this.supabase
       .from('certificate_templates')
       .select('id, organization_id')
@@ -934,6 +982,11 @@ export class TemplateRepository {
       .maybeSingle();
 
     if (templateError || !templateData) {
+      return { template: null, version: null };
+    }
+
+    // Verify version belongs to the template (double-check)
+    if (versionData.template_id !== templateId) {
       return { template: null, version: null };
     }
 
@@ -969,22 +1022,9 @@ export class TemplateRepository {
       required: boolean;
     }>
   ): Promise<Array<{ id: string; field_key: string; label: string; type: string; page_number: number; x: number; y: number; width: number | null; height: number | null; style: Record<string, unknown> | null; required: boolean }>> {
-    // Step 1: Delete existing fields
-    const { error: deleteError } = await this.supabase
-      .from('certificate_template_fields')
-      .delete()
-      .eq('template_version_id', templateVersionId);
-
-    if (deleteError) {
-      throw new Error(`[TemplateRepository.replaceFields] Failed to delete existing fields: ${deleteError.message} (PostgREST code: ${deleteError.code || 'unknown'})`);
-    }
-
-    // Step 2: Insert new fields (if any)
-    if (fields.length === 0) {
-      return [];
-    }
-
-    const fieldsToInsert = fields.map(field => ({
+    // Step 1: Upsert all fields (insert or update on conflict)
+    // This handles race conditions where multiple requests might be updating simultaneously
+    const fieldsToUpsert = fields.map(field => ({
       template_version_id: templateVersionId,
       field_key: field.field_key,
       label: field.label,
@@ -998,16 +1038,66 @@ export class TemplateRepository {
       required: field.required,
     }));
 
-    const { data: insertedFields, error: insertError } = await this.supabase
+    // Use upsert with ON CONFLICT to handle duplicates atomically
+    const { data: upsertedFields, error: upsertError } = await this.supabase
       .from('certificate_template_fields')
-      .insert(fieldsToInsert as any)
+      .upsert(fieldsToUpsert as any, {
+        onConflict: 'template_version_id,field_key',
+        ignoreDuplicates: false,
+      })
       .select('id, field_key, label, type, page_number, x, y, width, height, style, required');
 
-    if (insertError) {
-      throw new Error(`[TemplateRepository.replaceFields] Failed to insert fields: ${insertError.message} (PostgREST code: ${insertError.code || 'unknown'})`);
+    if (upsertError) {
+      throw new Error(`[TemplateRepository.replaceFields] Failed to upsert fields: ${upsertError.message} (PostgREST code: ${upsertError.code || 'unknown'})`);
     }
 
-    return (insertedFields ?? []).map((field: any) => ({
+    // Step 2: Delete fields that are no longer in the new set (orphaned fields)
+    // Only delete if we have fields to keep (if fields.length === 0, we'll delete all below)
+    if (fields.length > 0) {
+      const fieldKeysToKeep = new Set(fields.map(f => f.field_key));
+      
+      // Get all current field_keys for this version
+      const { data: currentFields, error: fetchError } = await this.supabase
+        .from('certificate_template_fields')
+        .select('field_key')
+        .eq('template_version_id', templateVersionId);
+
+      if (fetchError) {
+        // Log but don't fail - orphaned fields are not critical
+        console.warn(`[TemplateRepository.replaceFields] Failed to fetch current fields for cleanup: ${fetchError.message}`);
+      } else if (currentFields) {
+        // Delete fields that are not in the new set
+        const fieldsToDelete = currentFields
+          .filter(f => !fieldKeysToKeep.has(f.field_key))
+          .map(f => f.field_key);
+
+        if (fieldsToDelete.length > 0) {
+          const { error: deleteError } = await this.supabase
+            .from('certificate_template_fields')
+            .delete()
+            .eq('template_version_id', templateVersionId)
+            .in('field_key', fieldsToDelete);
+
+          if (deleteError) {
+            // Log but don't fail - orphaned fields are not critical
+            console.warn(`[TemplateRepository.replaceFields] Failed to delete orphaned fields: ${deleteError.message}`);
+          }
+        }
+      }
+    } else {
+      // If no fields provided, delete all fields for this version
+      const { error: deleteError } = await this.supabase
+        .from('certificate_template_fields')
+        .delete()
+        .eq('template_version_id', templateVersionId);
+
+      if (deleteError) {
+        throw new Error(`[TemplateRepository.replaceFields] Failed to delete all fields: ${deleteError.message} (PostgREST code: ${deleteError.code || 'unknown'})`);
+      }
+    }
+
+    // Return the upserted fields
+    return (upsertedFields ?? []).map((field: any) => ({
       id: field.id,
       field_key: field.field_key,
       label: field.label,
