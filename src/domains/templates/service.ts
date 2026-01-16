@@ -826,6 +826,7 @@ export class TemplateService {
 
         const result = await this.repository.createTemplateVersion(
           template_id,
+          userId,
           {
             version_number: 1,
             source_file_id: file_id,
@@ -1185,7 +1186,7 @@ export class TemplateService {
     templateId: string,
     versionId: string,
     organizationId: string,
-    userId?: string
+    userId: string
   ): Promise<{
     status: 'generated' | 'already_exists';
     preview_file_id: string | null;
@@ -1241,27 +1242,26 @@ export class TemplateService {
       organizationId: versionInfo.template.organization_id,
       templateId,
       versionId,
+      userId,
     });
 
-    // Create audit log (only if userId is provided)
-    if (userId) {
-      try {
-        await supabase.from('app_audit_logs').insert({
-          organization_id: organizationId,
-          actor_user_id: userId,
-          action: 'template.preview_generated',
-          entity_type: 'certificate_template_version',
-          entity_id: versionId,
-          metadata: {
-            template_id: templateId,
-            preview_file_id: result.preview_file_id,
-            path: result.preview_path,
-          },
-        } as any);
-      } catch (auditError) {
-        // Audit log failures are non-fatal
-        console.warn('[TemplateService.generatePreview] Failed to create audit log:', auditError);
-      }
+    // Create audit log
+    try {
+      await supabase.from('app_audit_logs').insert({
+        organization_id: organizationId,
+        actor_user_id: userId,
+        action: 'template.preview_generated',
+        entity_type: 'certificate_template_version',
+        entity_id: versionId,
+        metadata: {
+          template_id: templateId,
+          preview_file_id: result.preview_file_id,
+          path: result.preview_path,
+        },
+      } as any);
+    } catch (auditError) {
+      // Audit log failures are non-fatal
+      console.warn('[TemplateService.generatePreview] Failed to create audit log:', auditError);
     }
 
     return {

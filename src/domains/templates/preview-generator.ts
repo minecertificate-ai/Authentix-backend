@@ -12,6 +12,7 @@ export interface PreviewGenerationOptions {
   organizationId: string;
   templateId: string;
   versionId: string;
+  userId: string;
 }
 
 export interface PreviewGenerationResult {
@@ -39,12 +40,14 @@ export async function generateTemplatePreview(
   supabase: SupabaseClient,
   options: PreviewGenerationOptions
 ): Promise<PreviewGenerationResult> {
-  const { organizationId, templateId, versionId } = options;
+  const { organizationId, templateId, versionId, userId } = options;
 
-  // Step 1: Check if preview already exists (idempotency)
-  const { data: existingVersion, error: versionError } = await supabase
+  console.log('[PreviewGenerator] Starting preview generation', { organizationId, templateId, versionId, userId });
+
+  // Step 1: Fetch version with source file info
+  const { data: versionData, error: versionError } = await supabase
     .from('certificate_template_versions')
-    .select('preview_file_id, source_file_id, source_file:source_file_id (bucket, path, mime_type)')
+    .select('id, preview_file_id, source_file_id')
     .eq('id', versionId)
     .single();
 
@@ -52,22 +55,29 @@ export async function generateTemplatePreview(
     throw new Error(`[PreviewGenerator] Failed to fetch version: ${versionError.message} (PostgREST code: ${versionError.code || 'unknown'})`);
   }
 
-  if (!existingVersion) {
+  if (!versionData) {
     throw new Error(`[PreviewGenerator] Version not found: ${versionId}`);
   }
 
+  console.log('[PreviewGenerator] Version data fetched', {
+    versionId,
+    preview_file_id: versionData.preview_file_id,
+    source_file_id: versionData.source_file_id
+  });
+
   // If preview already exists, return existing preview info
-  if (existingVersion.preview_file_id) {
+  if (versionData.preview_file_id) {
     const { data: existingFile, error: fileError } = await supabase
       .from('files')
       .select('id, bucket, path, mime_type, size_bytes')
-      .eq('id', existingVersion.preview_file_id)
+      .eq('id', versionData.preview_file_id)
       .single();
 
     if (fileError || !existingFile) {
       throw new Error(`[PreviewGenerator] Failed to fetch existing preview file: ${fileError?.message || 'Not found'}`);
     }
 
+    console.log('[PreviewGenerator] Preview already exists', { preview_file_id: existingFile.id });
     return {
       preview_file_id: existingFile.id,
       preview_path: existingFile.path,
@@ -77,14 +87,26 @@ export async function generateTemplatePreview(
     };
   }
 
-  const sourceFile = (existingVersion as any).source_file;
-  if (!sourceFile) {
-    throw new Error(`[PreviewGenerator] Source file not found for version ${versionId}`);
+  // Step 2: Fetch source file separately (more reliable than JOIN)
+  const { data: sourceFile, error: sourceFileError } = await supabase
+    .from('files')
+    .select('id, bucket, path, mime_type')
+    .eq('id', versionData.source_file_id)
+    .single();
+
+  if (sourceFileError || !sourceFile) {
+    throw new Error(`[PreviewGenerator] Source file not found for version ${versionId}: ${sourceFileError?.message || 'Not found'}`);
   }
 
-  const sourceMimeType = sourceFile.mime_type;
-  const sourcePath = sourceFile.path;
-  const sourceBucket = sourceFile.bucket;
+  console.log('[PreviewGenerator] Source file fetched', {
+    source_file_id: sourceFile.id,
+    mime_type: sourceFile.mime_type,
+    path: sourceFile.path
+  });
+
+  const sourceMimeType = sourceFile.mime_type as string;
+  const sourcePath = sourceFile.path as string;
+  const sourceBucket = sourceFile.bucket as string;
 
   // Step 2: Download source file from storage
   const { data: sourceFileData, error: downloadError } = await supabase.storage
@@ -181,6 +203,7 @@ export async function generateTemplatePreview(
         mime_type: previewMimeType,
         size_bytes: previewBuffer.length,
         checksum_sha256: checksum,
+        created_by_user_id: userId,
       } as any)
       .select('id, bucket, path, mime_type, size_bytes')
       .single();
@@ -202,11 +225,28 @@ export async function generateTemplatePreview(
     throw error;
   }
 
+  console.log('[PreviewGenerator] Preview file created in files table', {
+    preview_file_id: fileData.id,
+    preview_path: fileData.path
+  });
+
   // Step 7: Update version with preview_file_id
-  const { error: updateError } = await supabase
+  console.log('[PreviewGenerator] Updating version with preview_file_id', {
+    versionId,
+    preview_file_id: fileData.id
+  });
+
+  const { error: updateError, data: updateData } = await supabase
     .from('certificate_template_versions')
     .update({ preview_file_id: fileData.id } as any)
-    .eq('id', versionId);
+    .eq('id', versionId)
+    .select('id, preview_file_id');
+
+  console.log('[PreviewGenerator] Version update result', {
+    versionId,
+    updateError: updateError?.message,
+    updateData
+  });
 
   if (updateError) {
     // Cleanup: delete file and registry entry

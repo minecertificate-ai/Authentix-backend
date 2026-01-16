@@ -548,7 +548,6 @@ export class TemplateRepository {
     }
   ): Promise<{ template_id: string }> {
     // Create template record first (latest_version_id NULL initially)
-    // Note: status column removed - all templates are active and ready to use
     const { data, error } = await this.supabase
       .from('certificate_templates')
       .insert({
@@ -556,7 +555,6 @@ export class TemplateRepository {
         category_id: dto.category_id,
         subcategory_id: dto.subcategory_id,
         title: dto.title,
-        // status: removed - all templates are active and ready to use
         created_by_user_id: userId,
       } as any)
       .select('id')
@@ -613,6 +611,7 @@ export class TemplateRepository {
    */
   async createTemplateVersion(
     templateId: string,
+    userId: string,
     versionData: {
       version_number: number;
       source_file_id: string;
@@ -630,6 +629,7 @@ export class TemplateRepository {
         page_count: versionData.page_count,
         normalized_pages: versionData.normalized_pages,
         preview_file_id: versionData.preview_file_id,
+        created_by_user_id: userId,
       } as any)
       .select('id')
       .single();
