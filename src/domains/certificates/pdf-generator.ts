@@ -1,21 +1,61 @@
 /**
- * PDF GENERATOR
+ * PDF/IMAGE GENERATOR
  *
- * Service for generating certificate PDFs from templates.
+ * Service for generating certificate PDFs or images from templates.
+ * - PDF templates → output as PDF with overlaid text
+ * - Image templates → output as image (same format) with overlaid text
  */
 
 import { PDFDocument, rgb, StandardFonts, type PDFPage } from 'pdf-lib';
 import QRCode from 'qrcode';
 import { format } from 'date-fns';
-import type { CertificateField } from '../templates/types.js';
+import sharp from 'sharp';
 import type { FieldMapping } from './types.js';
+
+/**
+ * Internal field type for certificate generation
+ * This includes all style properties that may come from the database style JSON
+ */
+export interface GeneratorField {
+  id: string;
+  field_key?: string;
+  label?: string;
+  type: string;
+  page_number?: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fontSize: number;
+  fontFamily: string;
+  color: string;
+  textAlign: 'left' | 'center' | 'right';
+  fontWeight?: string;
+  fontStyle?: string;
+  prefix?: string;
+  suffix?: string;
+  dateFormat?: string;
+  style?: Record<string, unknown>;
+  required?: boolean;
+}
 
 interface GeneratePDFOptions {
   templateUrl: string;
-  templateType: 'pdf' | 'png' | 'jpg' | 'jpeg';
+  templateType: 'pdf' | 'png' | 'jpg' | 'jpeg' | 'image';
   templateWidth?: number;
   templateHeight?: number;
-  fields: CertificateField[];
+  fields: GeneratorField[];
+  fieldMappings: FieldMapping[];
+  rowData: Record<string, unknown>;
+  includeQR: boolean;
+  verificationToken?: string;
+  appUrl: string;
+}
+
+interface GenerateImageOptions {
+  templateUrl: string;
+  templateMimeType: string;
+  fields: GeneratorField[];
   fieldMappings: FieldMapping[];
   rowData: Record<string, unknown>;
   includeQR: boolean;
@@ -41,6 +81,16 @@ export async function generateCertificatePDF(
     verificationToken,
     appUrl,
   } = options;
+
+  // Log field mapping details for debugging
+  console.log('[PDFGenerator] Starting certificate generation with:', {
+    template_type: templateType,
+    fields_count: fields.length,
+    field_mappings_count: fieldMappings.length,
+    row_data_keys: Object.keys(rowData),
+    fields_info: fields.map(f => ({ id: f.id, field_key: f.field_key, type: f.type, label: f.label })),
+    field_mappings_info: fieldMappings.map(m => ({ fieldId: m.fieldId, columnName: m.columnName })),
+  });
 
   let pdfDoc: PDFDocument;
   let firstPage: PDFPage;
@@ -82,6 +132,14 @@ export async function generateCertificatePDF(
     });
   }
 
+  console.log('[PDFGenerator] Processing fields:', {
+    fieldCount: fields.length,
+    mappingCount: fieldMappings.length,
+    fields: fields.map(f => ({ id: f.id, label: f.label, type: f.type })),
+    mappings: fieldMappings,
+    rowDataKeys: Object.keys(rowData),
+  });
+
   // Add fields to PDF
   for (const field of fields) {
     if (field.type === 'qr_code') {
@@ -100,10 +158,26 @@ export async function generateCertificatePDF(
       }
     } else {
       // Get value from row data
-      const mapping = fieldMappings.find((m) => m.fieldId === field.id);
-      if (!mapping) continue;
+      // Try to match by field.id first (database UUID), then by field_key (for client-generated UUIDs)
+      let mapping = fieldMappings.find((m) => m.fieldId === field.id);
+      if (!mapping && field.field_key) {
+        // Fallback: try matching fieldId to field_key (handles client-generated UUIDs)
+        mapping = fieldMappings.find((m) => m.fieldId === field.field_key);
+      }
+      if (!mapping && field.field_key) {
+        // Fallback 2: try matching with sanitized fieldId to field_key
+        mapping = fieldMappings.find((m) => {
+          const sanitizedFieldId = m.fieldId.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+          return sanitizedFieldId === field.field_key;
+        });
+      }
+      if (!mapping) {
+        console.log(`[PDFGenerator] No mapping found for field: ${field.id} (${field.label}, field_key: ${field.field_key})`);
+        continue;
+      }
 
       let value = String(rowData[mapping.columnName] ?? '');
+      console.log(`[PDFGenerator] Field ${field.label}: mapping=${mapping.columnName}, value="${value}"`);
 
       // Format dates
       if ((field.type === 'start_date' || field.type === 'end_date') && value) {
@@ -151,6 +225,176 @@ export async function generateCertificatePDF(
 
   // Save PDF
   return await pdfDoc.save();
+}
+
+/**
+ * Generate a single certificate as an image (PNG, JPEG, or WebP)
+ * Used when the template is an image format
+ */
+export async function generateCertificateImage(
+  options: GenerateImageOptions
+): Promise<Uint8Array> {
+  const {
+    templateUrl,
+    templateMimeType,
+    fields,
+    fieldMappings,
+    rowData,
+    includeQR,
+    verificationToken,
+    appUrl,
+  } = options;
+
+  // Fetch template image
+  const templateResponse = await fetch(templateUrl);
+  const templateBuffer = Buffer.from(await templateResponse.arrayBuffer());
+
+  // Get image metadata
+  const metadata = await sharp(templateBuffer).metadata();
+  const imageWidth = metadata.width || 800;
+  const imageHeight = metadata.height || 600;
+
+  console.log('[ImageGenerator] Processing fields:', {
+    fieldCount: fields.length,
+    mappingCount: fieldMappings.length,
+    fields: fields.map(f => ({ id: f.id, label: f.label, type: f.type })),
+    mappings: fieldMappings,
+    rowDataKeys: Object.keys(rowData),
+  });
+
+  // Build SVG overlay for text and QR code
+  const svgElements: string[] = [];
+
+  // Add text fields
+  for (const field of fields) {
+    if (field.type === 'qr_code') {
+      continue; // Handle QR separately
+    }
+
+    // Get value from row data
+    // Try to match by field.id first (database UUID), then by field_key (for client-generated UUIDs)
+    let mapping = fieldMappings.find((m) => m.fieldId === field.id);
+    if (!mapping && field.field_key) {
+      // Fallback: try matching fieldId to field_key (handles client-generated UUIDs)
+      mapping = fieldMappings.find((m) => m.fieldId === field.field_key);
+    }
+    if (!mapping && field.field_key) {
+      // Fallback 2: try matching with sanitized fieldId to field_key
+      mapping = fieldMappings.find((m) => {
+        const sanitizedFieldId = m.fieldId.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+        return sanitizedFieldId === field.field_key;
+      });
+    }
+    if (!mapping) {
+      console.log(`[ImageGenerator] No mapping found for field: ${field.id} (${field.label}, field_key: ${field.field_key})`);
+      continue;
+    }
+
+    let value = String(rowData[mapping.columnName] ?? '');
+    console.log(`[ImageGenerator] Field ${field.label}: mapping=${mapping.columnName}, value="${value}"`);
+
+    // Format dates
+    if ((field.type === 'start_date' || field.type === 'end_date') && value) {
+      try {
+        const date = new Date(value);
+        if (!isNaN(date.getTime())) {
+          value = format(date, field.dateFormat ?? 'MMMM dd, yyyy');
+        }
+      } catch {
+        // Keep original value if date parsing fails
+      }
+    }
+
+    // Add prefix/suffix
+    const finalValue = `${field.prefix ?? ''}${value}${field.suffix ?? ''}`;
+
+    // Calculate text position
+    const textX = field.x;
+    const textY = field.y + field.height / 2;
+
+    // Text alignment
+    let textAnchor = 'start';
+    let adjustedX = textX;
+    if (field.textAlign === 'center') {
+      textAnchor = 'middle';
+      adjustedX = textX + field.width / 2;
+    } else if (field.textAlign === 'right') {
+      textAnchor = 'end';
+      adjustedX = textX + field.width;
+    }
+
+    // Font style
+    const fontWeight = field.fontWeight === 'bold' ? 'bold' : 'normal';
+    const fontStyle = field.fontStyle === 'italic' ? 'italic' : 'normal';
+    const fontFamily = field.fontFamily || 'Arial, Helvetica, sans-serif';
+    const fontSize = field.fontSize || 16;
+    const color = field.color || '#000000';
+
+    // Escape special characters for SVG
+    const escapedValue = finalValue
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+    svgElements.push(
+      `<text x="${adjustedX}" y="${textY}" ` +
+      `font-family="${fontFamily}" font-size="${fontSize}px" ` +
+      `font-weight="${fontWeight}" font-style="${fontStyle}" ` +
+      `fill="${color}" text-anchor="${textAnchor}" ` +
+      `dominant-baseline="middle">${escapedValue}</text>`
+    );
+  }
+
+  // Add QR code if requested
+  if (includeQR && verificationToken) {
+    const qrField = fields.find((f) => f.type === 'qr_code');
+    if (qrField) {
+      // Generate QR code as data URL
+      const qrDataUrl = await QRCode.toDataURL(`${appUrl}/verify/${verificationToken}`, {
+        width: qrField.width,
+        margin: 1,
+      });
+
+      // Extract base64 data from data URL
+      const base64Data = qrDataUrl.replace(/^data:image\/png;base64,/, '');
+
+      svgElements.push(
+        `<image x="${qrField.x}" y="${qrField.y}" ` +
+        `width="${qrField.width}" height="${qrField.height}" ` +
+        `href="data:image/png;base64,${base64Data}"/>`
+      );
+    }
+  }
+
+  // Create SVG overlay
+  const svgOverlay = `<svg width="${imageWidth}" height="${imageHeight}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    ${svgElements.join('\n    ')}
+  </svg>`;
+
+  // Composite the SVG overlay onto the template image
+  let outputImage = sharp(templateBuffer)
+    .composite([
+      {
+        input: Buffer.from(svgOverlay),
+        top: 0,
+        left: 0,
+      },
+    ]);
+
+  // Output in the same format as the template
+  let outputBuffer: Buffer;
+  if (templateMimeType === 'image/png') {
+    outputBuffer = await outputImage.png().toBuffer();
+  } else if (templateMimeType === 'image/webp') {
+    outputBuffer = await outputImage.webp({ quality: 90 }).toBuffer();
+  } else {
+    // Default to JPEG for image/jpeg
+    outputBuffer = await outputImage.jpeg({ quality: 90 }).toBuffer();
+  }
+
+  return new Uint8Array(outputBuffer);
 }
 
 /**
