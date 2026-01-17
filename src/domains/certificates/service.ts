@@ -302,8 +302,14 @@ export class CertificateService {
         id: string;
         file_name: string;
         recipient_name: string;
+        recipient_email: string | null;
+        recipient_phone: string | null;
         certificate_number: string;
         verification_token: string;
+        issued_at: string;
+        expires_at: string | null;
+        file_path: string;
+        preview_path: string | null;
       }> = [];
       const errors: Array<{ index: number; error: string }> = [];
 
@@ -375,20 +381,62 @@ export class CertificateService {
 
           const certificateBuffer = Buffer.from(certificateBytes);
 
-          // Extract expires_at from row data (look for common column names)
-          const expiryKeys = ['Expiry Date', 'expiry_date', 'Expires At', 'expires_at', 'Valid Until', 'valid_until', 'Expiration', 'expiration', 'Validity', 'validity_date'];
+          // Determine issue date (use custom if provided, otherwise NOW)
+          const issuedAt = dto.options?.issue_date
+            ? new Date(dto.options.issue_date)
+            : new Date();
+
+          // Calculate expires_at based on expiry_type option
           let expiresAt: string | null = null;
-          for (const key of expiryKeys) {
-            if (rowData[key] && String(rowData[key]).trim()) {
-              const expiryValue = String(rowData[key]).trim();
-              try {
-                const expiryDate = new Date(expiryValue);
-                if (!isNaN(expiryDate.getTime())) {
-                  expiresAt = expiryDate.toISOString();
-                  break;
+          const expiryType = dto.options?.expiry_type ?? 'year';
+
+          if (expiryType === 'custom' && dto.options?.custom_expiry_date) {
+            // Use custom expiry date
+            expiresAt = new Date(dto.options.custom_expiry_date).toISOString();
+          } else if (expiryType === 'never') {
+            // No expiry
+            expiresAt = null;
+          } else {
+            // Calculate expiry based on type
+            const expiryDate = new Date(issuedAt);
+            switch (expiryType) {
+              case 'day':
+                expiryDate.setDate(expiryDate.getDate() + 1);
+                break;
+              case 'week':
+                expiryDate.setDate(expiryDate.getDate() + 7);
+                break;
+              case 'month':
+                expiryDate.setMonth(expiryDate.getMonth() + 1);
+                break;
+              case 'year':
+                expiryDate.setFullYear(expiryDate.getFullYear() + 1);
+                break;
+              case '5_years':
+                expiryDate.setFullYear(expiryDate.getFullYear() + 5);
+                break;
+              default:
+                // Default to 1 year
+                expiryDate.setFullYear(expiryDate.getFullYear() + 1);
+            }
+            expiresAt = expiryDate.toISOString();
+          }
+
+          // Fallback: Check CSV data for expiry date (for backwards compatibility)
+          if (!expiresAt && expiryType !== 'never') {
+            const expiryKeys = ['Expiry Date', 'expiry_date', 'Expires At', 'expires_at', 'Valid Until', 'valid_until', 'Expiration', 'expiration', 'Validity', 'validity_date'];
+            for (const key of expiryKeys) {
+              if (rowData[key] && String(rowData[key]).trim()) {
+                const expiryValue = String(rowData[key]).trim();
+                try {
+                  const expiryDate = new Date(expiryValue);
+                  if (!isNaN(expiryDate.getTime())) {
+                    expiresAt = expiryDate.toISOString();
+                    break;
+                  }
+                } catch {
+                  // Continue to next key if date parsing fails
                 }
-              } catch {
-                // Continue to next key if date parsing fails
               }
             }
           }
@@ -397,7 +445,9 @@ export class CertificateService {
             recipient_name: recipient.recipient_name,
             certificate_number: certificateNumber,
             verification_token: verificationToken.substring(0, 10) + '...',
+            issued_at: issuedAt.toISOString(),
             expires_at: expiresAt,
+            expiry_type: expiryType,
           });
 
           // Create certificate record first to get the ID
@@ -419,7 +469,7 @@ export class CertificateService {
               verification_path: `/verify/${verificationToken}`,
               qr_payload_url: `${appUrl}/verify/${verificationToken}`,
               status: 'issued',
-              issued_at: new Date().toISOString(),
+              issued_at: issuedAt.toISOString(),
               expires_at: expiresAt,
             } as any)
             .select('id')
@@ -569,12 +619,24 @@ export class CertificateService {
           // Add to ZIP
           zip.file(`${fileName}.${outputExtension}`, certificateBuffer);
 
+          // Calculate preview path (matches the pattern used in Step 7)
+          const previewExtension = isPdfTemplate ? 'pdf' : 'png';
+          const certPreviewPath = previewFileId
+            ? `certificates/${organizationId}/${certificateId}/preview.${previewExtension}`
+            : null;
+
           certificateResults.push({
             id: certificateId,
             file_name: `${fileName}.${outputExtension}`,
             recipient_name: recipient.recipient_name,
+            recipient_email: recipient.recipient_email,
+            recipient_phone: recipient.recipient_phone,
             certificate_number: certificateNumber,
             verification_token: verificationToken,
+            issued_at: issuedAt.toISOString(),
+            expires_at: expiresAt,
+            file_path: storagePath,
+            preview_path: certPreviewPath,
           });
 
           console.log('[CertificateService] Generated certificate:', certificateId, 'for', recipient.recipient_name);
@@ -633,15 +695,56 @@ export class CertificateService {
         errors: errors.length,
       });
 
+      // Generate signed URLs for each certificate
+      const certificatesWithUrls = await Promise.all(
+        certificateResults.map(async (c) => {
+          let downloadUrl: string | null = null;
+          let previewUrl: string | null = null;
+
+          try {
+            const { data: downloadData } = await supabase.storage
+              .from('authentix')
+              .createSignedUrl(c.file_path, 3600);
+            downloadUrl = downloadData?.signedUrl ?? null;
+          } catch {
+            // Ignore URL generation errors
+          }
+
+          if (c.preview_path) {
+            try {
+              const { data: previewData } = await supabase.storage
+                .from('authentix')
+                .createSignedUrl(c.preview_path, 3600);
+              previewUrl = previewData?.signedUrl ?? null;
+            } catch {
+              // Ignore preview URL errors
+            }
+          }
+
+          return {
+            id: c.id,
+            certificate_number: c.certificate_number,
+            recipient_name: c.recipient_name,
+            recipient_email: c.recipient_email,
+            recipient_phone: c.recipient_phone,
+            issued_at: c.issued_at,
+            expires_at: c.expires_at,
+            download_url: downloadUrl,
+            preview_url: previewUrl,
+          };
+        })
+      );
+
+      // Only provide ZIP URL if more than 10 certificates
+      const zipDownloadUrl = certificateResults.length > 10 ? (signedUrlData?.signedUrl ?? null) : null;
+
       return {
         job_id: jobId,
         status: 'completed',
         download_url: signedUrlData?.signedUrl ?? '',
+        zip_download_url: zipDownloadUrl ?? undefined,
         total_certificates: certificateResults.length,
-        certificates: certificateResults.map((c) => ({
-          file_name: c.file_name,
-          recipient_name: c.recipient_name,
-        })),
+        certificates: certificatesWithUrls,
       };
     } catch (error) {
       // Update job status to failed

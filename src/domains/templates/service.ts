@@ -1276,4 +1276,205 @@ export class TemplateService {
       preview_path: result.preview_path,
     };
   }
+
+  // ============================================================================
+  // TEMPLATE USAGE HISTORY METHODS
+  // ============================================================================
+
+  /**
+   * Get recent template usage for a user
+   * Returns recently generated templates and in-progress designs
+   */
+  async getRecentUsage(
+    organizationId: string,
+    userId: string,
+    options: { limit?: number } = {}
+  ): Promise<{
+    recent_generated: Array<{
+      template_id: string;
+      template_title: string;
+      template_version_id: string | null;
+      preview_url: string | null;
+      last_generated_at: string;
+      certificates_count: number;
+      category_name: string | null;
+      subcategory_name: string | null;
+      fields: Array<{
+        id: string;
+        field_key: string;
+        label: string;
+        type: string;
+        page_number: number;
+        x: number;
+        y: number;
+        width: number | null;
+        height: number | null;
+        style: Record<string, unknown> | null;
+      }>;
+    }>;
+    in_progress: Array<{
+      template_id: string;
+      template_title: string;
+      template_version_id: string | null;
+      preview_url: string | null;
+      last_modified_at: string;
+      category_name: string | null;
+      subcategory_name: string | null;
+      fields: Array<{
+        id: string;
+        field_key: string;
+        label: string;
+        type: string;
+        page_number: number;
+        x: number;
+        y: number;
+        width: number | null;
+        height: number | null;
+        style: Record<string, unknown> | null;
+      }>;
+    }>;
+  }> {
+    console.log('[TemplateService.getRecentUsage] Fetching recent usage', {
+      organizationId,
+      userId,
+      options,
+    });
+
+    const { generated, in_progress } = await this.repository.getRecentUsage(
+      organizationId,
+      userId,
+      options
+    );
+
+    // Process generated templates
+    const recentGenerated = await Promise.all(
+      generated.map(async (row: any) => {
+        // Get preview URL if available
+        let previewUrl: string | null = null;
+        if (row.preview_bucket && row.preview_path) {
+          try {
+            previewUrl = await this.getPreviewUrlForPath(row.preview_bucket, row.preview_path);
+          } catch {
+            // Ignore preview URL errors
+          }
+        }
+
+        // Get fields for this version
+        const fields = row.template_version_id
+          ? await this.repository.getVersionFields(row.template_version_id)
+          : [];
+
+        return {
+          template_id: row.template_id,
+          template_title: row.template_title || 'Untitled',
+          template_version_id: row.template_version_id,
+          preview_url: previewUrl,
+          last_generated_at: row.last_used_at,
+          certificates_count: row.certificates_count || 0,
+          category_name: row.category_name,
+          subcategory_name: row.subcategory_name,
+          fields,
+        };
+      })
+    );
+
+    // Process in-progress templates
+    const inProgress = await Promise.all(
+      in_progress.map(async (row: any) => {
+        // Get preview URL if available
+        let previewUrl: string | null = null;
+        if (row.preview_bucket && row.preview_path) {
+          try {
+            previewUrl = await this.getPreviewUrlForPath(row.preview_bucket, row.preview_path);
+          } catch {
+            // Ignore preview URL errors
+          }
+        }
+
+        // For in-progress, use field_snapshot if available, otherwise get from DB
+        let fields: any[] = [];
+        if (row.field_snapshot && Array.isArray(row.field_snapshot)) {
+          fields = row.field_snapshot;
+        } else if (row.template_version_id) {
+          fields = await this.repository.getVersionFields(row.template_version_id);
+        }
+
+        return {
+          template_id: row.template_id,
+          template_title: row.template_title || 'Untitled',
+          template_version_id: row.template_version_id,
+          preview_url: previewUrl,
+          last_modified_at: row.last_used_at,
+          category_name: row.category_name,
+          subcategory_name: row.subcategory_name,
+          fields,
+        };
+      })
+    );
+
+    console.log('[TemplateService.getRecentUsage] Results', {
+      recent_generated_count: recentGenerated.length,
+      in_progress_count: inProgress.length,
+    });
+
+    return {
+      recent_generated: recentGenerated,
+      in_progress: inProgress,
+    };
+  }
+
+  /**
+   * Save in-progress design for a template
+   * Called when user is designing fields but hasn't generated yet
+   */
+  async saveInProgressDesign(
+    organizationId: string,
+    userId: string,
+    templateId: string,
+    templateVersionId: string | null,
+    fieldSnapshot: Record<string, unknown>[]
+  ): Promise<{ id: string }> {
+    console.log('[TemplateService.saveInProgressDesign] Saving', {
+      organizationId,
+      userId,
+      templateId,
+      fields_count: fieldSnapshot.length,
+    });
+
+    // Verify template belongs to organization
+    const template = await this.repository.findById(templateId, organizationId);
+    if (!template) {
+      throw new NotFoundError('Template not found');
+    }
+
+    return this.repository.saveInProgressDesign(
+      organizationId,
+      userId,
+      templateId,
+      templateVersionId,
+      fieldSnapshot
+    );
+  }
+
+  /**
+   * Record template usage after successful generation
+   * Called by certificate service after generation completes
+   */
+  async recordGenerationUsage(
+    organizationId: string,
+    userId: string,
+    templateId: string,
+    templateVersionId: string | null,
+    generationJobId: string,
+    certificatesCount: number
+  ): Promise<void> {
+    return this.repository.recordGenerationUsage(
+      organizationId,
+      userId,
+      templateId,
+      templateVersionId,
+      generationJobId,
+      certificatesCount
+    );
+  }
 }

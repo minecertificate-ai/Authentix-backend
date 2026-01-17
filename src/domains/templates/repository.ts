@@ -1181,4 +1181,230 @@ export class TemplateRepository {
       throw new Error(`[TemplateRepository.updatePreviewFileId] Failed to update preview_file_id: ${error.message} (PostgREST code: ${error.code || 'unknown'})`);
     }
   }
+
+  // ============================================================================
+  // TEMPLATE USAGE HISTORY METHODS
+  // ============================================================================
+
+  /**
+   * Get recent template usage for a user
+   * Returns both generated and in-progress templates
+   */
+  async getRecentUsage(
+    organizationId: string,
+    userId: string,
+    options: { limit?: number } = {}
+  ): Promise<{
+    generated: any[];
+    in_progress: any[];
+  }> {
+    const limit = options.limit ?? 10;
+
+    console.log('[TemplateRepository.getRecentUsage] Fetching recent usage', {
+      organizationId,
+      userId,
+      limit,
+    });
+
+    // Query using the view we created
+    const { data, error } = await this.supabase
+      .from('v_template_usage_recent')
+      .select('*')
+      .eq('organization_id', organizationId)
+      .eq('user_id', userId)
+      .order('last_used_at', { ascending: false })
+      .limit(limit * 2); // Fetch enough for both types
+
+    if (error) {
+      console.error('[TemplateRepository.getRecentUsage] Query error', {
+        error: error.message,
+        code: error.code,
+      });
+      // If view doesn't exist yet, return empty arrays
+      if (error.code === '42P01' || error.message.includes('does not exist')) {
+        return { generated: [], in_progress: [] };
+      }
+      throw new Error(`[TemplateRepository.getRecentUsage] Failed to fetch: ${error.message}`);
+    }
+
+    const generated = (data ?? [])
+      .filter((row: any) => row.usage_type === 'generated')
+      .slice(0, limit);
+    const in_progress = (data ?? [])
+      .filter((row: any) => row.usage_type === 'in_progress')
+      .slice(0, limit);
+
+    console.log('[TemplateRepository.getRecentUsage] Results', {
+      generated_count: generated.length,
+      in_progress_count: in_progress.length,
+    });
+
+    return { generated, in_progress };
+  }
+
+  /**
+   * Save or update in-progress design
+   * Uses upsert to handle both new and existing records
+   */
+  async saveInProgressDesign(
+    organizationId: string,
+    userId: string,
+    templateId: string,
+    templateVersionId: string | null,
+    fieldSnapshot: Record<string, unknown>[]
+  ): Promise<{ id: string }> {
+    console.log('[TemplateRepository.saveInProgressDesign] Saving in-progress design', {
+      organizationId,
+      userId,
+      templateId,
+      templateVersionId,
+      fields_count: fieldSnapshot.length,
+    });
+
+    const { data, error } = await this.supabase
+      .from('template_usage_history')
+      .upsert({
+        organization_id: organizationId,
+        user_id: userId,
+        template_id: templateId,
+        template_version_id: templateVersionId,
+        usage_type: 'in_progress',
+        field_snapshot: fieldSnapshot,
+        last_used_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as any, {
+        onConflict: 'organization_id,user_id,template_id',
+        ignoreDuplicates: false,
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      console.error('[TemplateRepository.saveInProgressDesign] Error', {
+        error: error.message,
+        code: error.code,
+      });
+      throw new Error(`[TemplateRepository.saveInProgressDesign] Failed: ${error.message}`);
+    }
+
+    return { id: data.id };
+  }
+
+  /**
+   * Delete in-progress design (e.g., when user completes generation)
+   */
+  async deleteInProgressDesign(
+    organizationId: string,
+    userId: string,
+    templateId: string
+  ): Promise<void> {
+    const { error } = await this.supabase
+      .from('template_usage_history')
+      .delete()
+      .eq('organization_id', organizationId)
+      .eq('user_id', userId)
+      .eq('template_id', templateId)
+      .eq('usage_type', 'in_progress');
+
+    if (error) {
+      console.error('[TemplateRepository.deleteInProgressDesign] Error', {
+        error: error.message,
+        code: error.code,
+      });
+      // Non-fatal - don't throw
+    }
+  }
+
+  /**
+   * Record template usage after successful generation
+   */
+  async recordGenerationUsage(
+    organizationId: string,
+    userId: string,
+    templateId: string,
+    templateVersionId: string | null,
+    generationJobId: string,
+    certificatesCount: number
+  ): Promise<void> {
+    console.log('[TemplateRepository.recordGenerationUsage] Recording generation usage', {
+      organizationId,
+      userId,
+      templateId,
+      generationJobId,
+      certificatesCount,
+    });
+
+    // First, delete any in-progress design for this template
+    await this.deleteInProgressDesign(organizationId, userId, templateId);
+
+    // Then, upsert the generation record
+    const { error } = await this.supabase
+      .from('template_usage_history')
+      .upsert({
+        organization_id: organizationId,
+        user_id: userId,
+        template_id: templateId,
+        template_version_id: templateVersionId,
+        usage_type: 'generated',
+        generation_job_id: generationJobId,
+        field_snapshot: null,
+        last_used_at: new Date().toISOString(),
+        certificates_count: certificatesCount,
+        updated_at: new Date().toISOString(),
+      } as any, {
+        onConflict: 'organization_id,user_id,template_id',
+        ignoreDuplicates: false,
+      });
+
+    if (error) {
+      console.error('[TemplateRepository.recordGenerationUsage] Error', {
+        error: error.message,
+        code: error.code,
+      });
+      // Non-fatal - don't throw, generation still succeeded
+    }
+  }
+
+  /**
+   * Get fields for a template version (to include in usage response)
+   */
+  async getVersionFields(versionId: string): Promise<Array<{
+    id: string;
+    field_key: string;
+    label: string;
+    type: string;
+    page_number: number;
+    x: number;
+    y: number;
+    width: number | null;
+    height: number | null;
+    style: Record<string, unknown> | null;
+  }>> {
+    const { data, error } = await this.supabase
+      .from('certificate_template_fields')
+      .select('id, field_key, label, type, page_number, x, y, width, height, style')
+      .eq('template_version_id', versionId)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.error('[TemplateRepository.getVersionFields] Error', {
+        error: error.message,
+        code: error.code,
+      });
+      return [];
+    }
+
+    return (data ?? []).map((f: any) => ({
+      id: f.id,
+      field_key: f.field_key,
+      label: f.label,
+      type: f.type,
+      page_number: f.page_number,
+      x: f.x,
+      y: f.y,
+      width: f.width,
+      height: f.height,
+      style: f.style,
+    }));
+  }
 }

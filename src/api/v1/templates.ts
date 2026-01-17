@@ -911,4 +911,140 @@ export async function registerTemplateRoutes(app: FastifyInstance): Promise<void
       }
     }
   );
+
+  // ============================================================================
+  // TEMPLATE USAGE HISTORY ENDPOINTS
+  // ============================================================================
+
+  /**
+   * GET /api/v1/templates/recent-usage
+   * Get recently used templates for the current user
+   * Returns both generated templates and in-progress designs
+   */
+  app.get(
+    '/templates/recent-usage',
+    async (request: FastifyRequest<{ Querystring: { limit?: string } }>, reply: FastifyReply) => {
+      const organizationId = request.context!.organizationId;
+      const userId = request.context!.userId;
+      const limit = request.query.limit ? parseInt(request.query.limit, 10) : 10;
+
+      if (!organizationId) {
+        request.log.warn({ userId }, '[GET /templates/recent-usage] Organization ID missing from auth context');
+        sendError(reply, 'BAD_REQUEST', 'Organization ID is required', 400);
+        return;
+      }
+
+      try {
+        request.log.info({
+          userId,
+          organizationId,
+          limit,
+        }, '[GET /templates/recent-usage] Fetching recent template usage');
+
+        const repository = new TemplateRepository(getSupabaseClient());
+        const service = new TemplateService(repository);
+
+        const result = await service.getRecentUsage(organizationId, userId, { limit });
+
+        request.log.info({
+          userId,
+          organizationId,
+          recent_generated_count: result.recent_generated.length,
+          in_progress_count: result.in_progress.length,
+        }, '[GET /templates/recent-usage] Recent usage fetched successfully');
+
+        sendSuccess(reply, result);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Failed to fetch recent usage';
+        request.log.error({
+          userId,
+          organizationId,
+          error: errorMessage,
+        }, '[GET /templates/recent-usage] Failed to fetch recent usage');
+
+        sendError(reply, 'INTERNAL_ERROR', errorMessage, 500);
+      }
+    }
+  );
+
+  /**
+   * POST /api/v1/templates/:templateId/save-progress
+   * Save in-progress design for a template
+   * Called when user is designing fields but hasn't generated yet
+   */
+  app.post(
+    '/templates/:templateId/save-progress',
+    async (
+      request: FastifyRequest<{
+        Params: { templateId: string };
+        Body: { template_version_id?: string; field_snapshot: Record<string, unknown>[] };
+      }>,
+      reply: FastifyReply
+    ) => {
+      const organizationId = request.context!.organizationId;
+      const userId = request.context!.userId;
+      const templateId = request.params.templateId;
+      const { template_version_id, field_snapshot } = request.body;
+
+      if (!organizationId) {
+        request.log.warn({ userId }, '[POST /templates/:templateId/save-progress] Organization ID missing from auth context');
+        sendError(reply, 'BAD_REQUEST', 'Organization ID is required', 400);
+        return;
+      }
+
+      if (!Array.isArray(field_snapshot)) {
+        sendError(reply, 'VALIDATION_ERROR', 'field_snapshot must be an array', 400);
+        return;
+      }
+
+      try {
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          fields_count: field_snapshot.length,
+        }, '[POST /templates/:templateId/save-progress] Saving in-progress design');
+
+        const repository = new TemplateRepository(getSupabaseClient());
+        const service = new TemplateService(repository);
+
+        const result = await service.saveInProgressDesign(
+          organizationId,
+          userId,
+          templateId,
+          template_version_id ?? null,
+          field_snapshot
+        );
+
+        request.log.info({
+          userId,
+          organizationId,
+          template_id: templateId,
+          usage_id: result.id,
+        }, '[POST /templates/:templateId/save-progress] In-progress design saved');
+
+        sendSuccess(reply, { id: result.id, saved: true });
+      } catch (error) {
+        if (error instanceof NotFoundError) {
+          request.log.warn({
+            userId,
+            organizationId,
+            template_id: templateId,
+          }, '[POST /templates/:templateId/save-progress] Template not found');
+
+          sendError(reply, 'NOT_FOUND', error.message, 404);
+        } else {
+          const errorMessage = error instanceof Error ? error.message : 'Failed to save in-progress design';
+          request.log.error({
+            userId,
+            organizationId,
+            template_id: templateId,
+            error: errorMessage,
+          }, '[POST /templates/:templateId/save-progress] Failed to save in-progress design');
+
+          sendError(reply, 'INTERNAL_ERROR', errorMessage, 500);
+        }
+      }
+    }
+  );
 }

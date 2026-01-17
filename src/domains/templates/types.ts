@@ -159,3 +159,96 @@ export interface TemplateEditorData {
     required: boolean;
   }>;
 }
+
+/**
+ * Template usage type
+ */
+export type TemplateUsageType = 'generated' | 'in_progress';
+
+/**
+ * Template usage history entity
+ */
+export interface TemplateUsageEntity {
+  id: string;
+  organization_id: string;
+  user_id: string;
+  template_id: string;
+  template_version_id: string | null;
+  usage_type: TemplateUsageType;
+  generation_job_id: string | null;
+  field_snapshot: Record<string, unknown>[] | null;
+  last_used_at: string;
+  certificates_count: number;
+  created_at: string;
+  updated_at: string;
+  // Joined fields from view
+  template_title?: string;
+  category_id?: string;
+  subcategory_id?: string;
+  category_name?: string;
+  subcategory_name?: string;
+  preview_bucket?: string;
+  preview_path?: string;
+  source_bucket?: string;
+  source_path?: string;
+  source_mime_type?: string;
+}
+
+/**
+ * Recent template usage response
+ */
+export interface RecentTemplateUsageResponse {
+  recent_generated: Array<{
+    template_id: string;
+    template_title: string;
+    template_version_id: string | null;
+    preview_url: string | null;
+    last_generated_at: string;
+    certificates_count: number;
+    category_name: string | null;
+    subcategory_name: string | null;
+    fields: Array<{
+      id: string;
+      field_key: string;
+      label: string;
+      type: string;
+      page_number: number;
+      x: number;
+      y: number;
+      width: number | null;
+      height: number | null;
+      style: Record<string, unknown> | null;
+    }>;
+  }>;
+  in_progress: Array<{
+    template_id: string;
+    template_title: string;
+    template_version_id: string | null;
+    preview_url: string | null;
+    last_modified_at: string;
+    category_name: string | null;
+    subcategory_name: string | null;
+    fields: Array<{
+      id: string;
+      field_key: string;
+      label: string;
+      type: string;
+      page_number: number;
+      x: number;
+      y: number;
+      width: number | null;
+      height: number | null;
+      style: Record<string, unknown> | null;
+    }>;
+  }>;
+}
+
+/**
+ * Save in-progress design DTO
+ */
+export const saveProgressSchema = z.object({
+  template_version_id: z.string().uuid().optional(),
+  field_snapshot: z.array(z.record(z.unknown())),
+});
+
+export type SaveProgressDTO = z.infer<typeof saveProgressSchema>
