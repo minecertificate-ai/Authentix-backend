@@ -121,8 +121,20 @@ export class CertificateService {
       throw new NotFoundError('Template not found');
     }
 
+    console.log('[CertificateService] Template data retrieved:', {
+      template_id: (templateData as any).id,
+      title: (templateData as any).title,
+      latest_version_id: (templateData as any).latest_version_id,
+      has_latest_version: !!(templateData as any).latest_version,
+      raw_template_data: JSON.stringify(templateData),
+    });
+
     const version = (templateData as any).latest_version;
     if (!version || !version.source_file) {
+      console.error('[CertificateService] Missing version or source file:', {
+        version: version ? JSON.stringify(version) : 'null',
+        has_source_file: version?.source_file ? 'yes' : 'no',
+      });
       throw new ValidationError('Template version or source file not found');
     }
 
@@ -179,6 +191,14 @@ export class CertificateService {
 
     const templateUrl = urlData.signedUrl;
     const templateMimeType = sourceFile.mime_type as string;
+
+    console.log('[CertificateService] Source file details:', {
+      file_id: sourceFile.id,
+      bucket: sourceFile.bucket,
+      path: sourceFile.path,
+      mime_type: sourceFile.mime_type,
+      raw_source_file: JSON.stringify(sourceFile),
+    });
 
     // Determine output format based on template type
     // PDF templates → export as PDF

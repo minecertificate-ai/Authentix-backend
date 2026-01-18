@@ -158,8 +158,14 @@ export async function generateCertificatePDF(
       }
     } else {
       // Get value from row data
-      // Try to match by field.id first (database UUID), then by field_key (for client-generated UUIDs)
+      // Try multiple matching strategies for field mapping
+      const originalFieldId = field.style?.originalFieldId as string | undefined;
+
       let mapping = fieldMappings.find((m) => m.fieldId === field.id);
+      if (!mapping && originalFieldId) {
+        // Try matching with originalFieldId stored in style
+        mapping = fieldMappings.find((m) => m.fieldId === originalFieldId);
+      }
       if (!mapping && field.field_key) {
         // Fallback: try matching fieldId to field_key (handles client-generated UUIDs)
         mapping = fieldMappings.find((m) => m.fieldId === field.field_key);
@@ -172,7 +178,7 @@ export async function generateCertificatePDF(
         });
       }
       if (!mapping) {
-        console.log(`[PDFGenerator] No mapping found for field: ${field.id} (${field.label}, field_key: ${field.field_key})`);
+        console.log(`[PDFGenerator] No mapping found for field: ${field.id} (${field.label}, field_key: ${field.field_key}, originalFieldId: ${originalFieldId})`);
         continue;
       }
 
@@ -272,8 +278,14 @@ export async function generateCertificateImage(
     }
 
     // Get value from row data
-    // Try to match by field.id first (database UUID), then by field_key (for client-generated UUIDs)
+    // Try multiple matching strategies for field mapping
+    const originalFieldId = field.style?.originalFieldId as string | undefined;
+
     let mapping = fieldMappings.find((m) => m.fieldId === field.id);
+    if (!mapping && originalFieldId) {
+      // Try matching with originalFieldId stored in style
+      mapping = fieldMappings.find((m) => m.fieldId === originalFieldId);
+    }
     if (!mapping && field.field_key) {
       // Fallback: try matching fieldId to field_key (handles client-generated UUIDs)
       mapping = fieldMappings.find((m) => m.fieldId === field.field_key);
@@ -286,7 +298,7 @@ export async function generateCertificateImage(
       });
     }
     if (!mapping) {
-      console.log(`[ImageGenerator] No mapping found for field: ${field.id} (${field.label}, field_key: ${field.field_key})`);
+      console.log(`[ImageGenerator] No mapping found for field: ${field.id} (${field.label}, field_key: ${field.field_key}, originalFieldId: ${originalFieldId})`);
       continue;
     }
 
