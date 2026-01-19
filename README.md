@@ -30,9 +30,17 @@ Copy `.env.example` to `.env` and fill in your credentials:
 cp .env.example .env
 ```
 
-Required variables:
+**Required variables:**
 - `SUPABASE_URL` - Your Supabase project URL
 - `SUPABASE_SERVICE_ROLE_KEY` - Supabase service role key (bypasses RLS)
+- `SUPABASE_ANON_KEY` - Supabase anonymous key (for auth operations)
+
+**Optional variables (with defaults):**
+- `PORT` - Backend server port (default: `3001`)
+- `FRONTEND_URL` - Frontend URL for CORS (default: `http://localhost:3000`)
+- `NODE_ENV` - Environment: `development`, `production`, or `test` (default: `development`)
+
+**For billing features (optional):**
 - `RAZORPAY_KEY_ID_TEST` / `RAZORPAY_KEY_ID_PROD` - Razorpay API keys
 - `RAZORPAY_KEY_SECRET_TEST` / `RAZORPAY_KEY_SECRET_PROD` - Razorpay API secrets
 - `RAZORPAY_WEBHOOK_SECRET_TEST` / `RAZORPAY_WEBHOOK_SECRET_PROD` - Webhook secrets
@@ -43,7 +51,55 @@ Required variables:
 npm run dev
 ```
 
-Server runs on `http://localhost:3000`
+**Backend server runs on `http://localhost:3001`** (frontend uses port 3000)
+
+**Important:** Make sure your frontend's `.env` file has:
+```
+BACKEND_API_URL=http://localhost:3001/api/v1
+```
+
+## Localhost Development Setup
+
+### Running Backend and Frontend Together
+
+1. **Backend Setup:**
+   ```bash
+   cd Authentix-backend
+   npm install
+   cp .env.example .env
+   # Edit .env and add your Supabase credentials
+   npm run dev
+   ```
+   Backend will run on `http://localhost:3001`
+
+2. **Frontend Setup:**
+   ```bash
+   cd Authentix-dashboard
+   npm install
+   # Create or edit .env.local file
+   echo "BACKEND_API_URL=http://localhost:3001/api/v1" >> .env.local
+   npm run dev
+   ```
+   Frontend will run on `http://localhost:3000`
+
+3. **How They Connect:**
+   - Frontend makes API calls to `/api/proxy/*` (Next.js route handler)
+   - Next.js proxy forwards requests to `BACKEND_API_URL` (your backend)
+   - Backend CORS is configured to allow `http://localhost:3000` in development
+   - Authentication uses HttpOnly cookies set by the backend
+
+### Verifying the Setup
+
+1. Check backend is running:
+   ```bash
+   curl http://localhost:3001/health
+   ```
+   Should return: `{"status":"ok","timestamp":"...","version":"1.0.0"}`
+
+2. Check frontend can reach backend:
+   - Open browser dev tools
+   - Navigate to `http://localhost:3000`
+   - Check Network tab for API calls going through `/api/proxy/*`
 
 ### 4. Build
 
